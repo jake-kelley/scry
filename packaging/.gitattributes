@@ -1,0 +1,6 @@
+# These scripts run on macOS via bash; force LF regardless of the checkout
+# platform's line-ending settings (this repo's committed on a machine with
+# core.autocrlf=true, which would otherwise checkout CRLF and break bash's
+# shebang/line parsing on macOS).
+*.sh text eol=lf
+*.plist text eol=lf

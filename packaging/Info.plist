@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.jakekelley.scry</string>
+	<key>CFBundleName</key>
+	<string>scry</string>
+	<key>CFBundleDisplayName</key>
+	<string>scry</string>
+	<key>CFBundleExecutable</key>
+	<string>scry</string>
+	<key>CFBundleIconFile</key>
+	<string>icon.icns</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<!-- Load-bearing (design doc §7): no Dock icon, no application menu.
+	     Without this a background-only utility takes up a Dock slot and
+	     grabs an app menu it has no use for. -->
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+</dict>
+</plist>

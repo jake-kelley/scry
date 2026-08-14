@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  This is a LaunchAgent, not a LaunchDaemon, and must stay that way (design
+  doc §7 "LaunchAgent, not LaunchDaemon"): a LaunchDaemon runs in session 0
+  with no window server connection and cannot draw a menu bar item at all.
+  It has to be a per-user agent in ~/Library/LaunchAgents, loaded into the
+  user's GUI session (gui/$UID), for the status item to exist.
+
+  install.sh fills in __SCRY_BIN__ with the path to the installed
+  scry.app's bundled binary before copying this into ~/Library/LaunchAgents.
+  Do not point this at a bare `go build` output — it must be the signed
+  binary inside the .app bundle (see SIGNING.md for why that matters).
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.jakekelley.scry</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>__SCRY_BIN__</string>
+		<string>daemon</string>
+	</array>
+
+	<key>RunAtLoad</key>
+	<true/>
+
+	<key>KeepAlive</key>
+	<true/>
+
+	<!-- Background: no GUI window of its own to manage beyond the status
+	     item: appropriate priority/App Nap treatment for a resident
+	     indexer, per design doc §7. -->
+	<key>ProcessType</key>
+	<string>Background</string>
+
+	<key>StandardOutPath</key>
+	<string>__SCRY_LOG_DIR__/scry.log</string>
+
+	<key>StandardErrorPath</key>
+	<string>__SCRY_LOG_DIR__/scry.err</string>
+</dict>
+</plist>

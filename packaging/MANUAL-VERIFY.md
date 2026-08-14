@@ -1,43 +1,75 @@
 # Manual verification (run these at the Mac, not over SSH)
 
-An SSH session has no Aqua/window-server connection, so none of this can be
-confirmed remotely — everything else about the bundle (structure, signing,
-plist validity, install/uninstall) was verified over SSH and doesn't need
-repeating here.
+Most of the install path *has* been verified over SSH, including things
+that were expected to be unverifiable. `launchctl bootstrap gui/$UID`
+loads the agent into the logged-in GUI session, so the app really does get
+an Aqua session and AppKit really does initialise. What follows is only
+what genuinely cannot be checked without eyes on the screen.
 
-1. **Menu bar item actually appears.**
-   Run `packaging/install.sh`, then look at the menu bar.
-   *Expected*: as of this task, nothing appears yet — the systray/status-item
-   code is phase 7's UI work (see `packaging/NOTES-FOR-UI.md`), not part of
-   this packaging task. What you're actually confirming here is that the
-   LaunchAgent starts the bundled binary without crashing and without a
-   Dock icon or app menu showing up (`LSUIElement` doing its job). Check
-   Activity Monitor for a running `scry` process, and check the Dock: it
-   should **not** have a scry icon.
+## Already verified over SSH — do not repeat
 
-2. **Login Items surfacing.**
-   System Settings → General → Login Items. After `install.sh`, "scry"
-   should be listed under the LaunchAgents/background items section, and its
-   toggle should be able to disable it (macOS 13+ behavior described in
-   design doc §7 — this is intentional, not something to defeat).
+- Bundle structure, `plutil -lint` on both plists, `LSUIElement = true`,
+  `CFBundleIdentifier = com.jakekelley.scry`.
+- `codesign --verify --strict --deep` passes; ad-hoc fallback warns loudly
+  when no `scry-codesign` identity exists.
+- `install.sh` loads the agent, which reaches `state = running`, `runs = 1`,
+  `last exit code = (never exited)`, with `arguments = {..., menubar}`.
+- The resident core works through the installed bundle: `scry status` over
+  the socket, the web UI on `127.0.0.1:8973` returning HTTP 200, and a live
+  FSEvents add (`touch` a file, query it back through both the socket and
+  the web UI) — all against the launchd-managed process.
+- `KeepAlive` relaunch on bare exit (SIGTERM → new pid) and `launchctl
+  bootout` stopping it for good. That pair is the mechanism the Quit menu
+  item uses; see `bootoutSelf` in `internal/menubar/run_darwin.go`.
+- `uninstall.sh` leaves no app, no agent, and no running process.
 
-3. **TCC prompt behavior.**
-   Add a root under `~/Documents` (`scry root add ~/Documents`), then
-   `packaging/uninstall.sh && packaging/install.sh` (a full rebuild+reinstall
-   cycle). If a `scry-codesign` identity is set up (`packaging/SIGNING.md`),
-   you should **not** get a repeat Documents permission prompt on the second
-   install. If you do get repeat prompts, check
-   `codesign -dv /Applications/scry.app` for `Authority=scry-codesign` — if
-   that's missing, the identity wasn't found or wasn't used.
+## Needs a human at the screen
 
-4. **Quitting/relaunch via launchctl.**
-   `launchctl kickstart -k gui/$(id -u)/com.jakekelley.scry` should kill and
-   restart the daemon (KeepAlive) without you having to re-run install.sh.
-   Confirm a new `scry` process appears in Activity Monitor shortly after.
+1. **The status item appears, and the icon looks right.**
+   `packaging/install.sh`, then look at the menu bar. A small monochrome
+   scry glyph should appear. Then switch System Settings → Appearance
+   between Light and Dark. The icon must stay legible in *both* — that is
+   what `SetTemplateIcon` buys, and a template icon that was accidentally
+   authored with colour looks correct in one mode and invisible or muddy
+   in the other. This is the single most likely visual defect.
 
-5. **Uninstall leaves no trace.**
-   After `packaging/uninstall.sh`, confirm: no `scry` process running, no
-   scry.app in /Applications or ~/Applications, no entry in Login Items, and
-   (per uninstall.sh's own printed note) your index/config under
-   `~/.cache/scry` and `~/.config/scry` are still there unless you passed
-   `--purge`.
+2. **No Dock icon, no app menu.**
+   With the app running, the Dock must **not** show scry and there must be
+   no scry application menu in the menu bar. That is `LSUIElement` working.
+
+3. **The menu reads correctly.**
+   Click the status item. Expect: Search…, a live count line, Rebuild
+   index, Preferences…, Quit. On a machine with no roots configured the
+   count line should read "No roots configured — see Preferences…", not
+   "0 files indexed". Choosing Preferences… must open a config file even
+   on a first-ever launch (it is created on demand if absent).
+
+4. **Quit actually quits.**
+   Choose Quit. The status item must disappear **and stay gone**. If it
+   vanishes and reappears within a second or two, `bootoutSelf` failed and
+   `KeepAlive` won — check stderr in `~/Library/Logs/scry/scry.err` for a
+   `launchctl bootout` error. It should come back at your next login.
+
+5. **The global hotkey and the panel.**
+   With the app running, press ⌥Space (configurable — `[hotkey] combo` in
+   the config file). A borderless Spotlight-style panel should appear;
+   type a few characters and results should update as you type. Press it
+   again, or Escape, to dismiss. Carbon's `RegisterEventHotKey` needs **no**
+   Accessibility permission, so if macOS prompts you for Accessibility
+   access, something has regressed — say so rather than granting it.
+   Note ⌥Space is a plausible conflict with other launchers (Alfred,
+   Raycast, Spotlight remaps); if nothing happens, check for a conflict
+   before assuming the hotkey is broken.
+
+6. **Login Items surfacing.**
+   System Settings → General → Login Items. "scry" should be listed under
+   background items, and its toggle should be able to disable it (macOS 13+
+   behaviour described in design doc §7 — intentional, not to be defeated).
+
+7. **TCC prompt behaviour across rebuilds.**
+   Add a root under `~/Documents`, then run `uninstall.sh && install.sh`.
+   With a `scry-codesign` identity set up (see `SIGNING.md`) you should
+   **not** get a repeat Documents prompt. If you do, check
+   `codesign -dv ~/Applications/scry.app` for `Authority=scry-codesign`; if
+   it says `Signature=adhoc`, the identity wasn't found and every rebuild
+   will keep re-prompting. This is design doc §9 item 6.

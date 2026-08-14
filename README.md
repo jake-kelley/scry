@@ -6,7 +6,7 @@ choose. Design in full: [`everything-macos-design.md`](../everything-macos-desig
 
 ## Status
 
-**Phases 1, 2, 3, 5, and 6 of 8 complete** (see the design doc's §10 build order):
+**All 8 phases complete** (see the design doc's §10 build order):
 
 - ✅ Config parsing, root normalization/collapse (`internal/config`, `internal/roots`)
 - ✅ Per-root shard data model (`internal/index`)
@@ -14,13 +14,21 @@ choose. Design in full: [`everything-macos-design.md`](../everything-macos-desig
 - ✅ Two-pass fuzzy matching and scoring (`internal/fuzzy`)
 - ✅ Multi-shard parallel query with merge and ranking (`internal/query`)
 - ✅ `scry <query>`, `scry root add/rm/list`, `scry index` CLI (`cmd/scry`)
-- ⬜ FSEvents watcher, incremental updates, offline roots (phase 4)
+- ✅ FSEvents watcher, incremental updates, offline roots (`internal/fsevents`,
+  `internal/watcher`)
 - ✅ Atomic per-shard snapshots and the recrawl scheduler (`internal/snapshot`,
   `internal/reconcile`)
 - ✅ Full query syntax (`internal/qsyntax`), the socket protocol (`internal/ipc`),
   resident daemon mode, and `--serve` web UI (`internal/web`)
-- ⬜ `.app` bundle, menu bar item, LaunchAgent (phase 7)
-- ⬜ Global hotkey, Spotlight-style panel (phase 8)
+- ✅ `.app` bundle, menu bar item, LaunchAgent (`packaging/`, `internal/menubar`)
+- ✅ Global hotkey, Spotlight-style panel (`internal/hotkey`, `internal/panel`)
+
+Verified green on Windows and on macOS 15.3.2 arm64, including
+`CGO_ENABLED=1 go test -race ./...`. The installed `.app` has been exercised end to
+end — LaunchAgent → status item process → socket → live FSEvents update → web UI.
+The things that need a human at the screen (icon rendering in light and dark, the
+panel drawing, the hotkey firing) are listed in
+[`packaging/MANUAL-VERIFY.md`](packaging/MANUAL-VERIFY.md).
 
 Without a running daemon, every command still loads each configured root from its
 on-disk snapshot (crawling only a root whose snapshot is missing, corrupt, or
@@ -29,10 +37,14 @@ design is actually built around. Load and query timings are printed to stderr so
 either path stays visible; the label always says honestly whether a root was
 **loaded** from snapshot or **crawled** fresh.
 
-Development happens on Windows; the shipping target is macOS. Everything built so
-far is deliberately OS-independent (no build tags, no platform-specific syscalls) —
-phase 4's FSEvents watcher and phase 7's `NSStatusItem` are where macOS-only code
-has to start. The socket transport (see below) is one exception worth calling out:
+Development happens on Windows; the shipping target is macOS. The macOS-only code is
+deliberately confined to four thin `//go:build darwin` files — `internal/fsevents`,
+`internal/hotkey`, `internal/panel`, and `internal/menubar`'s systray wiring — each
+paired with a non-darwin stub so `go build ./... && go test ./...` stays green on
+Windows with no Mac present. Everything with real logic in it (the watcher's apply
+rules, hotkey combo parsing, count formatting, query, ranking) lives outside those
+files and is tested on Windows against fakes. The socket transport is one exception
+worth calling out:
 it targets a unix socket per the design, and that has been confirmed to work with
 Go's stdlib on Windows 10+ too, so there has been no need for an OS-specific
 fallback path in practice — the fallback exists and is tested, but as a

@@ -1,11 +1,16 @@
-// Command scry is a fuzzy filename-search CLI, phases 1-5 of
-// "everything-macos-design.md": each invocation loads every configured
-// root from its on-disk snapshot when one is valid, falling back to a
-// fresh crawl (and saving a new snapshot) only for a root whose snapshot
-// is missing, stale, or corrupt, then serves one query against the
-// resulting in-memory shards. The resident daemon, FSEvents watcher, and
-// unix-socket protocol described later in the design are not implemented
-// yet — see the repository README for status.
+// Command scry is a fuzzy filename search over configured directory roots,
+// implementing all of "everything-macos-design.md".
+//
+// There are two ways to run it. `scry daemon` (headless) and `scry menubar`
+// (the macOS status item, which is what the installed .app launches) both
+// hold every root's shards in RAM, keep them current from FSEvents, and
+// answer over the unix socket. Every other subcommand prefers that socket
+// and only falls back to loading each root from its on-disk snapshot
+// in-process — crawling fresh, and saving a new snapshot, just for a root
+// whose snapshot is missing, stale, or corrupt.
+//
+// There is no --help flag: any argument that is not a known subcommand is
+// treated as a query, so `scry --help` searches for the string "--help".
 package main
 
 import (

@@ -189,7 +189,15 @@ paths = ["~/Library"]                # anchored: this directory only
 [index]
 follow_symlinks = false
 hidden = false
+recrawl_interval = "5m"              # default 24h; minimum 30s
 ```
+
+`recrawl_interval` is how often the daemon re-walks each root from scratch. It is
+a backstop, not the update mechanism — the FSEvents watcher already applies
+creates, renames and deletes within a second, so this exists to catch drift the
+watcher could have missed (events dropped while the machine slept, a root that
+was unmounted). Shortening it costs a full crawl each time: measured on a 43k-entry
+home directory that is ~1.6s. Anything under 30s is rejected.
 
 **`names`/`globs` versus `paths`.** `names` and `globs` match a *base name*, so
 they skip every matching directory anywhere in the tree — right for

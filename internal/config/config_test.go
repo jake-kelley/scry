@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDefault(t *testing.T) {
@@ -554,5 +555,69 @@ func TestExpandExcludePaths(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("ExpandExcludePaths[%d] = %q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+func TestRecrawlInterval(t *testing.T) {
+	cases := []struct {
+		name    string
+		value   string
+		want    time.Duration
+		wantErr bool
+	}{
+		{"unset means default", "", 0, false},
+		{"five minutes", "5m", 5 * time.Minute, false},
+		{"hours", "2h", 2 * time.Hour, false},
+		{"whitespace is not a value", "   ", 0, false},
+		{"unparseable", "5 minutes", 0, true},
+		{"below the floor", "1s", 0, true},
+		{"zero", "0s", 0, true},
+		{"negative", "-5m", 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Roots = []Root{{Path: "/tmp/x"}}
+			cfg.Index.RecrawlInterval = tc.value
+
+			if got := cfg.RecrawlInterval(); got != tc.want {
+				t.Errorf("RecrawlInterval() = %v, want %v", got, tc.want)
+			}
+			errs := cfg.Validate()
+			if tc.wantErr && len(errs) == 0 {
+				t.Errorf("Validate() accepted %q", tc.value)
+			}
+			if !tc.wantErr && len(errs) != 0 {
+				t.Errorf("Validate() rejected %q: %v", tc.value, errs)
+			}
+		})
+	}
+}
+
+// TestRecrawlIntervalRoundTrips guards the reason it is a string: it has
+// to survive a Save/Load cycle as "5m", not as a nanosecond count.
+func TestRecrawlIntervalRoundTrips(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	cfg := Default()
+	cfg.Roots = []Root{{Path: "/tmp/x"}}
+	cfg.Index.RecrawlInterval = "5m"
+
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(raw), `"5m"`) {
+		t.Errorf("saved config should contain the literal \"5m\", got:\n%s", raw)
+	}
+
+	back, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := back.RecrawlInterval(); got != 5*time.Minute {
+		t.Errorf("after round trip RecrawlInterval() = %v, want 5m", got)
 	}
 }

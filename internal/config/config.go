@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -40,6 +41,14 @@ type Exclude struct {
 type IndexOpts struct {
 	FollowSymlinks bool `toml:"follow_symlinks"`
 	Hidden         bool `toml:"hidden"`
+
+	// RecrawlInterval is how often the daemon recrawls each root from
+	// scratch, as a Go duration string ("5m", "2h", "24h"). Empty means
+	// the built-in default. Stored as a string rather than a
+	// time.Duration so the config file reads "5m" instead of TOML's
+	// nanosecond integer, and so a typo is a config error naming the bad
+	// value rather than a silent zero.
+	RecrawlInterval string `toml:"recrawl_interval"`
 }
 
 // HotkeyOpts holds the menu bar app's global search hotkey, per
@@ -334,6 +343,18 @@ func (c Config) Validate() []error {
 		}
 	}
 
+	if s := strings.TrimSpace(c.Index.RecrawlInterval); s != "" {
+		d, err := time.ParseDuration(s)
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("config: invalid recrawl_interval %q: %w "+
+				"(use a Go duration like \"5m\", \"2h\", \"24h\")", s, err))
+		case d < minRecrawlInterval:
+			errs = append(errs, fmt.Errorf("config: recrawl_interval %q is below the %s minimum: "+
+				"a full recrawl that often would never stop running", s, minRecrawlInterval))
+		}
+	}
+
 	return errs
 }
 
@@ -355,6 +376,29 @@ func validateExcludePath(p string) error {
 			"(it is anchored to one location; use [exclude] names for a base name matched anywhere)", p)
 	}
 	return nil
+}
+
+// minRecrawlInterval floors what the config will accept. The recrawl is a
+// full re-walk of a root, so an interval shorter than this stops being a
+// safety net for drift the watcher missed and becomes a permanent
+// background crawl.
+const minRecrawlInterval = 30 * time.Second
+
+// RecrawlInterval returns the configured recrawl period, or 0 when none is
+// set — which every caller passes straight to reconcile.NewScheduler,
+// whose documented contract is that a non-positive interval means the
+// default. An unparseable value also yields 0 here; Validate is what
+// reports it, so a broken duration degrades to the default rather than
+// stopping the daemon from starting.
+func (c Config) RecrawlInterval() time.Duration {
+	if strings.TrimSpace(c.Index.RecrawlInterval) == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(c.Index.RecrawlInterval)
+	if err != nil || d < minRecrawlInterval {
+		return 0
+	}
+	return d
 }
 
 // ExpandExcludePaths tilde-expands and cleans each entry so callers can

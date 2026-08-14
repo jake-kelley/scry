@@ -170,7 +170,9 @@ func startCore(ctx context.Context, cfg config.Config, logPrefix string) (*daemo
 	for i, r := range cfg.Roots {
 		specs[i] = reconcile.RootSpec{Path: r.Path, Opts: crawlOptions(cfg, r)}
 	}
-	sched := reconcile.NewScheduler(specs, reconcile.DefaultInterval, func(res reconcile.Result) {
+	// A zero here means "use reconcile's own default", which is exactly
+	// what an unset or rejected recrawl_interval yields.
+	sched := reconcile.NewScheduler(specs, cfg.RecrawlInterval(), func(res reconcile.Result) {
 		if res.Err != nil {
 			fmt.Fprintf(os.Stderr, "%s: reconcile %s: %v\n", logPrefix, res.Root, res.Err)
 			return

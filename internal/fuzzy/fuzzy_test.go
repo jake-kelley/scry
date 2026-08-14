@@ -233,6 +233,30 @@ func TestRankingExactSubstringBeatsPositionZeroSubsequence(t *testing.T) {
 	}
 }
 
+func TestRankingSeparatorGapBeatsContiguousRunElsewhere(t *testing.T) {
+	// "gomod" should prefer go.mod (query breaks its run across a single
+	// "." separator) over XMongoModel.ts (which contains a contiguous but
+	// boundary-less "gomod" run buried inside "...ngoModel"). A human
+	// expects go.mod first: skipping one separator to keep matching is not
+	// the same evidence of a poor match as a scattered alphanumeric gap.
+	dot := mustScore(t, "gomod", "go.mod")
+	contiguous := mustScore(t, "gomod", "xmongomodel.ts")
+	if dot <= contiguous {
+		t.Fatalf("go.mod scored %d, want > XMongoModel.ts %d", dot, contiguous)
+	}
+}
+
+func TestRankingSeparatorGapBeatsLongerAlnumMatch(t *testing.T) {
+	// "readmemd" should prefer README.md (breaks its run across a single
+	// "." separator) over readme_metadata.txt (a longer alphanumeric gap
+	// to reach the "d" in "data").
+	dot := mustScore(t, "readmemd", "readme.md")
+	longer := mustScore(t, "readmemd", "readme_metadata.txt")
+	if dot <= longer {
+		t.Fatalf("README.md scored %d, want > readme_metadata.txt %d", dot, longer)
+	}
+}
+
 // --- Synthetic corpus + benchmarks ------------------------------------------
 
 var corpusWords = []string{

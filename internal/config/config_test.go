@@ -117,6 +117,8 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 
 	want := Default()
 	want.Roots = []Root{
+		// An empty OfflinePolicy is normalized to "keep" on Save (and
+		// again on Load), so what round-trips is "keep", not "".
 		{Path: "/home/user/Documents"},
 		{Path: "/home/user/code", Exclude: []string{"target", "vendor"}, OfflinePolicy: "keep"},
 	}
@@ -128,6 +130,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
+	want.Roots[0].OfflinePolicy = "keep"
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("round trip mismatch:\ngot  = %+v\nwant = %+v", got, want)
 	}
@@ -180,6 +183,67 @@ func TestSaveCreatesParentDirs(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("expected file to exist: %v", err)
+	}
+}
+
+func TestAddRootThenSaveDefaultsOfflinePolicyToKeep(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	var c Config
+	if err := c.AddRoot("/tmp/a"); err != nil {
+		t.Fatalf("AddRoot() error = %v", err)
+	}
+	if c.Roots[0].OfflinePolicy != "" {
+		t.Fatalf("AddRoot() OfflinePolicy = %q, want empty before Save", c.Roots[0].OfflinePolicy)
+	}
+
+	if err := Save(path, c); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if !strings.Contains(string(raw), `offline_policy = "keep"`) {
+		t.Fatalf("saved file does not contain offline_policy = \"keep\":\n%s", raw)
+	}
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got.Roots[0].OfflinePolicy != "keep" {
+		t.Errorf("Load() OfflinePolicy = %q, want %q", got.Roots[0].OfflinePolicy, "keep")
+	}
+}
+
+func TestSaveExplicitDropOfflinePolicyRoundTripsUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	c := Default()
+	c.Roots = []Root{{Path: "/tmp/a", OfflinePolicy: "drop"}}
+
+	if err := Save(path, c); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if !strings.Contains(string(raw), `offline_policy = "drop"`) {
+		t.Fatalf("saved file does not contain offline_policy = \"drop\":\n%s", raw)
+	}
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got.Roots[0].OfflinePolicy != "drop" {
+		t.Errorf("Load() OfflinePolicy = %q, want %q", got.Roots[0].OfflinePolicy, "drop")
 	}
 }
 

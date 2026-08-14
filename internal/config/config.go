@@ -153,13 +153,35 @@ func Load(path string) (Config, error) {
 	if raw.Index != nil {
 		c.Index = *raw.Index
 	}
+	normalizeOfflinePolicies(c.Roots)
 	return c, nil
+}
+
+// normalizeOfflinePolicies fills in the default offline_policy ("keep") on
+// any root that left it unset. Validate treats "" as valid so an old config
+// file without the field still loads without error; this is what turns
+// that "" into the real default in memory, in place, once — on Load (an
+// existing file with the field omitted) and on Save (so a newly written
+// file never round-trips an empty string). A root with an explicit value
+// ("keep" or "drop") is left untouched.
+func normalizeOfflinePolicies(roots []Root) {
+	for i := range roots {
+		if roots[i].OfflinePolicy == "" {
+			roots[i].OfflinePolicy = "keep"
+		}
+	}
 }
 
 // Save writes c to path atomically: a temp file is written in the same
 // directory, fsynced, and renamed into place. Parent directories are
 // created as needed. The final file has mode 0600.
 func Save(path string, c Config) error {
+	// Copy Roots before normalizing so the caller's slice/config value is
+	// never mutated as a side effect of saving.
+	roots := append([]Root(nil), c.Roots...)
+	normalizeOfflinePolicies(roots)
+	c.Roots = roots
+
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("config: save %s: %w", path, err)

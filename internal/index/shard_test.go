@@ -2,6 +2,8 @@ package index
 
 import (
 	"fmt"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -33,14 +35,43 @@ func TestPathReconstructionThreeLevelsDeep(t *testing.T) {
 		want string
 	}{
 		{s.RootID(), "/root"},
-		{a, "/root/A"},
-		{b, "/root/A/B"},
-		{c, "/root/A/B/file.txt"},
+		{a, filepath.Join("/root", "A")},
+		{b, filepath.Join("/root", "A", "B")},
+		{c, filepath.Join("/root", "A", "B", "file.txt")},
 	}
 	for _, tt := range tests {
 		if got := s.Path(tt.id); got != tt.want {
 			t.Errorf("Path(%d) = %q, want %q", tt.id, got, tt.want)
 		}
+	}
+}
+
+// TestPathUsesOSSeparatorConsistently guards against the root/child join
+// mixing separators: a root that ends in the OS separator (as
+// filepath.Dir-derived roots often do) must not produce a path with the
+// "wrong" separator anywhere in it once children are appended — e.g.
+// `C:\Users\jake` + "docs" + "design-notes.md" must never come out as
+// `C:\Users/docs/design-notes.md`. filepath.Separator is used throughout
+// so this assertion holds on both Windows and Unix.
+func TestPathUsesOSSeparatorConsistently(t *testing.T) {
+	root := "root" + string(filepath.Separator) // trailing separator, like a mounted volume
+	s := New(root)
+	a := s.Upsert(s.RootID(), "docs", FlagDir, 0, 0)
+	b := s.Upsert(a, "portanote", FlagDir, 0, 0)
+	c := s.Upsert(b, "design-notes.md", 0, 123, 456)
+
+	got := s.Path(c)
+
+	wrongSep := '/'
+	if filepath.Separator == '/' {
+		wrongSep = '\\'
+	}
+	if strings.ContainsRune(got, wrongSep) {
+		t.Fatalf("Path(%d) = %q, contains non-OS separator %q", c, got, string(wrongSep))
+	}
+	wantParts := 4 // root, docs, portanote, design-notes.md
+	if parts := strings.Count(got, string(filepath.Separator)) + 1; parts < wantParts {
+		t.Fatalf("Path = %q (%d separator-joined components), want at least %d", got, parts, wantParts)
 	}
 }
 
@@ -198,8 +229,8 @@ func TestCompactPreservesLiveEntries(t *testing.T) {
 	newKeep1 := findChild(newB, "keep1.txt")
 	newKeep2 := findChild(rootID, "keep2.txt")
 
-	if s.Path(newKeep1) != "/root/A/B/keep1.txt" {
-		t.Errorf("Path(keep1) after Compact = %q", s.Path(newKeep1))
+	if want := filepath.Join("/root", "A", "B", "keep1.txt"); s.Path(newKeep1) != want {
+		t.Errorf("Path(keep1) after Compact = %q, want %q", s.Path(newKeep1), want)
 	}
 	e, _ := s.Get(newKeep1)
 	if e.Size != before[keep1].size || e.MTime != before[keep1].mtime {
@@ -208,8 +239,8 @@ func TestCompactPreservesLiveEntries(t *testing.T) {
 	if s.parent[newKeep1] != newB {
 		t.Errorf("keep1 parent not remapped to new B id")
 	}
-	if s.Path(newKeep2) != "/root/keep2.txt" {
-		t.Errorf("Path(keep2) after Compact = %q", s.Path(newKeep2))
+	if want := filepath.Join("/root", "keep2.txt"); s.Path(newKeep2) != want {
+		t.Errorf("Path(keep2) after Compact = %q, want %q", s.Path(newKeep2), want)
 	}
 }
 
@@ -342,8 +373,8 @@ func TestConcurrentReadsAndWrites(t *testing.T) {
 				if _, ok := s.Get(seed); !ok {
 					t.Error("Get(seed) = false during concurrent writes")
 				}
-				if p := s.Path(seed); p != "/root/dir/seed.txt" {
-					t.Errorf("Path(seed) = %q during concurrent writes", p)
+				if p, want := s.Path(seed), filepath.Join("/root", "dir", "seed.txt"); p != want {
+					t.Errorf("Path(seed) = %q during concurrent writes, want %q", p, want)
 				}
 				_ = s.Children(dir)
 				_ = s.Len()

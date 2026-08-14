@@ -21,13 +21,32 @@ type Match struct {
 //   - boundaryBonus: extra credit when a matched character starts a "word"
 //     — see isBoundary. This is what makes a query like "qr24" prefer
 //     matching the R that starts a new word segment over a nearer, but
-//     boundary-less, R.
+//     boundary-less, R. It also does double duty backstopping
+//     separatorGapCost below: a match that hops separators tends to land
+//     on several word-starts in a row, and that is the signal that is
+//     supposed to carry it past a same-length contiguous run elsewhere.
 //   - consecutiveBonus: extra credit when a matched character immediately
 //     follows the previous matched character (a contiguous run), on top of
 //     matchBase and any boundary bonus for that character.
 //   - gapCost: per-skipped-character penalty for the distance between one
 //     matched character and the next (or between the start of name and the
-//     first matched character). Contiguous runs pay nothing here.
+//     first matched character), charged against a skipped alphanumeric
+//     character. Contiguous runs pay nothing here.
+//   - separatorGapCost: the per-skipped-character charge for a skipped
+//     separator character (- _ . space /) instead of an alphanumeric one.
+//     It is negative — hopping a lone separator is rewarded, not merely
+//     charged less — because filenames are full of dots and underscores,
+//     and skipping one to continue a match ("gomod" over "go.mod") is not
+//     the evidence of a poor match that skipping arbitrary letters/digits
+//     is; go.mod's two separator-adjacent boundary hits should be enough
+//     to beat a same-length contiguous run elsewhere (e.g. "gomod" against
+//     "XMongoModel.ts"), and the flat per-character gapCost is too coarse
+//     to reflect that without a compensating reward on the separator side.
+//     A gap is charged per skipped character at its own rate — a gap that
+//     mixes separator and alphanumeric characters pays the normal rate for
+//     the alphanumeric ones and the reward for the separator ones, so a
+//     long run of skipped separators (rare in real filenames) does add up;
+//     that tradeoff is accepted in exchange for fixing the common case.
 //   - exactSubstringBonus: awarded once, on top of everything else, when
 //     the entire query matched as one contiguous run in name (i.e. name
 //     literally contains query as a substring).
@@ -36,9 +55,10 @@ type Match struct {
 //     otherwise-identical match in the middle.
 const (
 	matchBase           = 10
-	boundaryBonus       = 15
+	boundaryBonus       = 20
 	consecutiveBonus    = 8
 	gapCost             = 1
+	separatorGapCost    = -6
 	exactSubstringBonus = 60
 	prefixBonus         = 25
 )
@@ -111,6 +131,19 @@ func Score(query, name []byte) (Match, bool) {
 		return Match{}, false
 	}
 
+	// prefixSkip[j] is the total cost of skipping (not matching) name-runes
+	// 0..j-1, at the per-character rate skipCost gives each one: cheap for
+	// a separator, full price for anything else. The cost of a gap between
+	// a match ending just before position k+1 and the next match at
+	// position j (i.e. skipping runes k+1..j-1) is then the prefix-sum
+	// difference prefixSkip[j]-prefixSkip[k+1] — O(1) per lookup, and it is
+	// what lets the running-max trick below stay linear in j despite the
+	// per-character rate no longer being uniform.
+	prefixSkip := make([]int, n+1)
+	for j, r := range nRunes {
+		prefixSkip[j+1] = prefixSkip[j] + skipCost(r)
+	}
+
 	// parent[i][j] records, for the DP row that matched qRunes[i] at
 	// nRunes[j], which name-rune index the previous query character was
 	// matched at (or -1 if i==0, i.e. this is the first matched char).
@@ -135,8 +168,7 @@ func Score(query, name []byte) (Match, bool) {
 		if nRunes[j] != qRunes[0] {
 			continue
 		}
-		gap := j
-		prev[j] = matchBase + boundaryScore(nRunes, j) - gapCost*gap
+		prev[j] = matchBase + boundaryScore(nRunes, j) - prefixSkip[j]
 	}
 
 	for i := 1; i < m; i++ {
@@ -151,7 +183,7 @@ func Score(query, name []byte) (Match, bool) {
 			// it only ever covers positions strictly before j (a
 			// character can't match at or before the one it follows).
 			if j >= 1 && prev[j-1] != negInf {
-				v := prev[j-1] + gapCost*(j-1)
+				v := prev[j-1] + prefixSkip[j]
 				if v > runningMax {
 					runningMax = v
 					runningMaxPos = j - 1
@@ -171,7 +203,7 @@ func Score(query, name []byte) (Match, bool) {
 				}
 			}
 			if runningMax != negInf {
-				v := runningMax + gapCost - gapCost*j + matchBase + bb
+				v := runningMax - prefixSkip[j] + matchBase + bb
 				if v > best {
 					best = v
 					bestParent = runningMaxPos
@@ -257,6 +289,19 @@ func boundaryScore(name []rune, j int) int {
 		return 0
 	}
 	return boundaryBonus
+}
+
+// skipCost returns the per-character penalty for skipping (not matching)
+// rune r as part of a gap. Separator characters (- _ . space /) are cheap
+// to skip over — filenames are full of them, and hopping one is weak
+// evidence of a poor match. Anything else (letters, digits, everything
+// else) pays the full gapCost.
+func skipCost(r rune) int {
+	switch r {
+	case '-', '_', '.', ' ', '/':
+		return separatorGapCost
+	}
+	return gapCost
 }
 
 func isBoundary(name []rune, j int) bool {

@@ -1,6 +1,7 @@
 package index
 
 import (
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -201,7 +202,12 @@ func (s *Shard) Path(id uint32) string {
 		parts[i], parts[j] = parts[j], parts[i]
 	}
 
-	return s.root + "/" + strings.Join(parts, "/")
+	// filepath.Join uses the OS separator consistently and cleans the
+	// result, so a root ending in a trailing separator (e.g. `C:\Users\` on
+	// Windows) never produces a mixed-separator path like
+	// `C:\Users/foo/bar`. Only called for the ~200 displayed results, not
+	// every entry, so the extra allocation here is not a hot-path concern.
+	return filepath.Join(append([]string{s.root}, parts...)...)
 }
 
 // Children returns the ids of the direct children of id. Returns nil for a

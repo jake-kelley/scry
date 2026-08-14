@@ -17,15 +17,26 @@
 	<key>Label</key>
 	<string>com.jakekelley.scry</string>
 
+	<!-- `menubar`, NOT `daemon`. Both run the same resident core (indexer,
+	     FSEvents watcher, socket server); `menubar` additionally owns the
+	     main thread with systray.Run() and draws the status item, starting
+	     that core from onReady. Pointing this at `daemon` installs a
+	     perfectly working background indexer with no menu bar item at all,
+	     which is the one thing the .app bundle exists to provide. -->
 	<key>ProgramArguments</key>
 	<array>
 		<string>__SCRY_BIN__</string>
-		<string>daemon</string>
+		<string>menubar</string>
 	</array>
 
 	<key>RunAtLoad</key>
 	<true/>
 
+	<!-- KeepAlive means the Quit menu item cannot simply exit: launchd
+	     would relaunch it instantly and Quit would look broken. The status
+	     item boots its own job out of gui/$UID first (see bootoutSelf in
+	     internal/menubar/run_darwin.go). bootout lasts for this login
+	     session only, so scry still comes back at the next login. -->
 	<key>KeepAlive</key>
 	<true/>
 

@@ -1,0 +1,22 @@
+# This repo is developed on Windows and built on macOS, and the Windows
+# clone has core.autocrlf=true. Without this file that setting rewrites Go
+# sources to CRLF on checkout, and `gofmt -l` then reports every one of
+# them as unformatted — which trains you to ignore gofmt output, right up
+# until it is reporting something real.
+#
+# Go, shell scripts and plists are LF everywhere, in the working tree as
+# well as in the object store.
+*.go   text eol=lf
+*.mod  text eol=lf
+*.sum  text eol=lf
+*.sh   text eol=lf
+*.md   text eol=lf
+*.html text eol=lf
+*.plist text eol=lf
+*.m    text eol=lf
+*.h    text eol=lf
+*.c    text eol=lf
+
+# Generated icon art and snapshots are binary; never touch them.
+*.png  binary
+*.icns binary

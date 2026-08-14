@@ -5,6 +5,8 @@ package menubar
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"strings"
 
 	"fyne.io/systray"
 
@@ -135,9 +137,42 @@ func (s *appState) eventLoop(mSearch, mRebuild, mPrefs, mQuit *systray.MenuItem)
 				// reaped by process exit instead of a clean "stop".
 				fmt.Fprintf(os.Stderr, "scry: menubar: stopping daemon: %v\n", err)
 			}
+			// Under the installed LaunchAgent, exiting is not enough:
+			// packaging/com.jakekelley.scry.plist sets KeepAlive, so
+			// launchd relaunches us the instant the process goes away and
+			// "Quit" appears to do nothing at all. Boot the job out of the
+			// GUI domain first so launchd stops supervising it. bootout is
+			// scoped to this login session, not persistent like
+			// `launchctl disable`, so scry still starts at the next login
+			// — which is what a user means by Quit rather than Uninstall.
+			bootoutSelf()
 			systray.Quit()
 			return
 		}
+	}
+}
+
+// bootoutSelf removes this process's launchd job from the GUI domain, if
+// this process is in fact launchd-managed. launchd sets XPC_SERVICE_NAME
+// to the job label for the processes it supervises; a scry started by hand
+// from a shell either has it unset or has the placeholder "0", and then
+// there is no job to boot out and plain process exit is correct.
+//
+// Failures are logged, never fatal: the worst case is the KeepAlive
+// relaunch this exists to prevent, and reporting that beats hanging on to
+// a menu bar item the user has already dismissed.
+func bootoutSelf() {
+	label := os.Getenv("XPC_SERVICE_NAME")
+	if label == "" || label == "0" {
+		return
+	}
+	target := fmt.Sprintf("gui/%d/%s", os.Getuid(), label)
+	// Synchronous: launchd sends this process SIGTERM as part of booting
+	// the job out, and racing that against our own exit is how the
+	// relaunch sneaks back in.
+	if out, err := exec.Command("launchctl", "bootout", target).CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "scry: menubar: launchctl bootout %s: %v: %s\n",
+			target, err, strings.TrimSpace(string(out)))
 	}
 }
 

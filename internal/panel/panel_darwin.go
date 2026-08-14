@@ -9,11 +9,12 @@
 // discipline internal/fsevents follows.
 //
 // Like internal/hotkey's RegisterEventHotKey, every Cocoa/WebKit call
-// here runs on the main thread — dispatched via dispatch_sync onto the
-// main queue, which is serviced by the same NSApplication run loop
-// fyne.io/systray's Run() already owns. No second thread, no
-// mainthread.Init: see internal/menubar's package doc for the fuller
-// argument.
+// here runs on the main thread, which is serviced by the same
+// NSApplication run loop fyne.io/systray's Run() already owns. No second
+// thread, no mainthread.Init: see internal/menubar's package doc for the
+// fuller argument. Getting onto that thread goes through runOnMainSync
+// rather than a bare dispatch_sync, because one of the two callers is
+// already on it — see that function's comment.
 package panel
 
 /*
@@ -43,12 +44,39 @@ package panel
 }
 @end
 
+// runOnMainSync runs block on the main thread and waits for it.
+//
+// The isMainThread check is load-bearing, not defensive padding. The two
+// callers of this file's entry points arrive on different threads: the
+// "Search…" menu item runs on a Go goroutine, which is never the main
+// thread, while the global hotkey arrives through Carbon's event handler,
+// which fires on the main run loop — the very run loop that
+// dispatch_get_main_queue() is drained by. A dispatch_sync onto a queue
+// the calling thread already owns is not a deadlock that eventually
+// resolves or times out: libdispatch detects the reentrancy and calls
+// __builtin_trap(), so before this check existed, pressing the hotkey
+// killed the process outright with SIGTRAP.
+//
+// This is the flip side of the design decision in internal/hotkey. Using
+// Carbon's RegisterEventHotKey instead of a library that wants a thread of
+// its own means the callback lands on the run loop AppKit is already
+// pumping, which is exactly what made the hotkey cheap — and it is also
+// precisely why the panel cannot assume it is being called from off the
+// main thread.
+static void runOnMainSync(dispatch_block_t block) {
+	if ([NSThread isMainThread]) {
+		block();
+	} else {
+		dispatch_sync(dispatch_get_main_queue(), block);
+	}
+}
+
 // createPanelC builds the panel and loads url into its WKWebView. Runs
-// synchronously on the main queue because every AppKit/WebKit object
+// synchronously on the main thread because every AppKit/WebKit object
 // created here must live on the thread that owns the run loop.
 void* createPanelC(const char* url) {
 	__block ScryPanel* panel = nil;
-	dispatch_sync(dispatch_get_main_queue(), ^{
+	runOnMainSync(^{
 		NSRect frame = NSMakeRect(0, 0, 680, 420);
 		NSUInteger style = NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel;
 		panel = [[ScryPanel alloc] initWithContentRect:frame
@@ -89,7 +117,7 @@ static void centerOnActiveScreen(ScryPanel* panel) {
 }
 
 void togglePanelC(void* p) {
-	dispatch_sync(dispatch_get_main_queue(), ^{
+	runOnMainSync(^{
 		ScryPanel* panel = (__bridge ScryPanel*)p;
 		if ([panel isVisible]) {
 			[panel orderOut:nil];
@@ -102,7 +130,7 @@ void togglePanelC(void* p) {
 }
 
 void closePanelC(void* p) {
-	dispatch_sync(dispatch_get_main_queue(), ^{
+	runOnMainSync(^{
 		ScryPanel* panel = (__bridge ScryPanel*)p;
 		[panel orderOut:nil];
 	});

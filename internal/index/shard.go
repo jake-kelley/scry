@@ -157,6 +157,23 @@ func (s *Shard) lowerNameOf(id uint32) string {
 	return string(s.names[off : off+uint32(n)])
 }
 
+// Lookup returns the id of parent's child named name (matched
+// case-insensitively, the same folding Upsert applies), or false if parent
+// has no such live child. This is the primitive the FSEvents watcher uses
+// to resolve a filesystem path into shard ids incrementally, without
+// re-crawling: walk path components from the root, Lookup-ing one level at
+// a time.
+func (s *Shard) Lookup(parent uint32, name string) (uint32, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	m, ok := s.childIndex[parent]
+	if !ok {
+		return 0, false
+	}
+	id, ok := m[strings.ToLower(name)]
+	return id, ok
+}
+
 // Get returns the entry for id, or the zero value and false if id is unknown
 // or has been removed.
 func (s *Shard) Get(id uint32) (Entry, bool) {

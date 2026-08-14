@@ -90,7 +90,7 @@ func Crawl(root string, opts Options) (*index.Shard, Stats, error) {
 				}
 				return nil
 			}
-			if matchesExclude(name, opts.Excludes, opts.Globs) {
+			if MatchesExclude(name, opts.Excludes, opts.Globs) {
 				stats.Skipped++
 				if isDir {
 					return fs.SkipDir
@@ -183,9 +183,11 @@ func Crawl(root string, opts Options) (*index.Shard, Stats, error) {
 	return shard, stats, nil
 }
 
-// matchesExclude reports whether name should be skipped: an exact match
-// against excludes, or a filepath.Match hit against any of globs.
-func matchesExclude(name string, excludes, globs []string) bool {
+// MatchesExclude reports whether name should be skipped: an exact match
+// against excludes, or a filepath.Match hit against any of globs. Exported
+// so internal/watcher can apply the same exclude rules to names it sees
+// arrive via FSEvents, without duplicating the logic.
+func MatchesExclude(name string, excludes, globs []string) bool {
 	for _, e := range excludes {
 		if name == e {
 			return true

@@ -134,3 +134,21 @@ func (s *Shard) SetOnline(online bool) {
 	defer s.mu.Unlock()
 	s.online = online
 }
+
+// LastEID returns the FSEvents id this shard is current as of. Zero means
+// the shard has never been positioned against a live event stream (e.g. it
+// came from a fresh crawl rather than an incremental update).
+func (s *Shard) LastEID() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.lastEID
+}
+
+// SetLastEID records the FSEvents id this shard is now current as of. Used
+// by snapshot restore and by the recrawl reconciler to carry a shard's
+// watermark forward across a full-swap refresh.
+func (s *Shard) SetLastEID(eid uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastEID = eid
+}

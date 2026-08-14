@@ -283,7 +283,13 @@ func (s *Shard) EntryAt(off uint32) (uint32, bool) {
 func (s *Shard) Compact() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.compactLocked()
+}
 
+// compactLocked is Compact's body, assuming the caller already holds the
+// write lock. Split out so WriteTo can compact and serialize under a single
+// critical section without recursive locking.
+func (s *Shard) compactLocked() {
 	aliveOld := make([]uint32, 0, s.len)
 	for i, dead := range s.dead {
 		if !dead {

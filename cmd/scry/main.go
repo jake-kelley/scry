@@ -1,9 +1,11 @@
-// Command scry is a fuzzy filename-search CLI, phase 1-3 of
-// "everything-macos-design.md": every invocation crawls its configured
-// roots fresh, then serves one query against the resulting in-memory
-// shards. The resident daemon, FSEvents watcher, and on-disk snapshots
-// described later in the design are not implemented yet — see the
-// repository README for status.
+// Command scry is a fuzzy filename-search CLI, phases 1-5 of
+// "everything-macos-design.md": each invocation loads every configured
+// root from its on-disk snapshot when one is valid, falling back to a
+// fresh crawl (and saving a new snapshot) only for a root whose snapshot
+// is missing, stale, or corrupt, then serves one query against the
+// resulting in-memory shards. The resident daemon, FSEvents watcher, and
+// unix-socket protocol described later in the design are not implemented
+// yet — see the repository README for status.
 package main
 
 import (
@@ -19,6 +21,7 @@ import (
 	"scry/internal/index"
 	"scry/internal/query"
 	"scry/internal/roots"
+	"scry/internal/snapshot"
 )
 
 func main() {
@@ -30,7 +33,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: scry <query> | scry root add/rm/list | scry index")
+		return fmt.Errorf("usage: scry <query> | scry root add/rm/list | scry index | scry status")
 	}
 
 	switch args[0] {
@@ -38,6 +41,8 @@ func run(args []string) error {
 		return runRoot(args[1:])
 	case "index":
 		return runIndex(args[1:])
+	case "status":
+		return runStatus(args[1:])
 	default:
 		return runSearch(args)
 	}
@@ -68,7 +73,8 @@ func crawlOptions(cfg config.Config, r config.Root) crawler.Options {
 }
 
 // crawlAll crawls every configured root in parallel and returns one shard
-// per root (in cfg.Roots order) plus each root's crawl Stats.
+// per root (in cfg.Roots order) plus each root's crawl Stats. It never
+// touches snapshots; callers decide whether and when to save.
 func crawlAll(cfg config.Config) ([]*index.Shard, []crawler.Stats) {
 	shards := make([]*index.Shard, len(cfg.Roots))
 	stats := make([]crawler.Stats, len(cfg.Roots))
@@ -94,6 +100,73 @@ func crawlAll(cfg config.Config) ([]*index.Shard, []crawler.Stats) {
 	return shards, stats
 }
 
+// saveAll saves every shard in shards to its snapshot file, in parallel.
+// A save failure for one root is reported to stderr but never aborts the
+// others or the caller's overall command.
+func saveAll(shards []*index.Shard) {
+	var wg sync.WaitGroup
+	for _, s := range shards {
+		if s == nil {
+			continue
+		}
+		wg.Add(1)
+		go func(s *index.Shard) {
+			defer wg.Done()
+			if err := snapshot.Save(s); err != nil {
+				fmt.Fprintf(os.Stderr, "scry: warning: could not save snapshot for %s: %v\n", s.Root(), err)
+			}
+		}(s)
+	}
+	wg.Wait()
+}
+
+// loadOrCrawlAll loads each configured root from its snapshot; a root whose
+// snapshot is missing, corrupt, or stale (index.ErrStale) is crawled fresh
+// instead and its new snapshot saved, per §7/§8: a bad shard costs one
+// root, never the whole app. Returns one shard per root (in cfg.Roots
+// order), each root's crawl Stats (zero for a root that loaded from
+// snapshot), and whether each root was loaded rather than crawled.
+func loadOrCrawlAll(cfg config.Config) (shards []*index.Shard, stats []crawler.Stats, loaded []bool) {
+	shards = make([]*index.Shard, len(cfg.Roots))
+	stats = make([]crawler.Stats, len(cfg.Roots))
+	loaded = make([]bool, len(cfg.Roots))
+
+	var wg sync.WaitGroup
+	var toSave []*index.Shard
+	var mu sync.Mutex
+
+	for i, r := range cfg.Roots {
+		wg.Add(1)
+		go func(i int, r config.Root) {
+			defer wg.Done()
+
+			if s, err := snapshot.Load(r.Path); err == nil {
+				shards[i] = s
+				loaded[i] = true
+				return
+			}
+
+			shard, st, err := crawler.Crawl(r.Path, crawlOptions(cfg, r))
+			if err != nil {
+				st.Errors++
+				if shard == nil {
+					shard = index.New(r.Path)
+				}
+			}
+			shards[i] = shard
+			stats[i] = st
+
+			mu.Lock()
+			toSave = append(toSave, shard)
+			mu.Unlock()
+		}(i, r)
+	}
+	wg.Wait()
+
+	saveAll(toSave)
+	return shards, stats, loaded
+}
+
 // runSearch implements `scry <query>`.
 func runSearch(args []string) error {
 	q := args[0]
@@ -107,7 +180,7 @@ func runSearch(args []string) error {
 	}
 
 	crawlStart := time.Now()
-	shards, _ := crawlAll(cfg)
+	shards, _, _ := loadOrCrawlAll(cfg)
 	crawlDur := time.Since(crawlStart)
 
 	queryStart := time.Now()
@@ -121,8 +194,9 @@ func runSearch(args []string) error {
 	return nil
 }
 
-// runIndex implements `scry index`: crawl every configured root and report
-// per-root stats.
+// runIndex implements `scry index`: force a fresh crawl of every configured
+// root regardless of any existing snapshot, report per-root stats, and
+// re-save each root's snapshot.
 func runIndex(args []string) error {
 	cfg, _, err := loadConfig()
 	if err != nil {
@@ -133,6 +207,7 @@ func runIndex(args []string) error {
 	}
 
 	shards, stats := crawlAll(cfg)
+	saveAll(shards)
 
 	var totalEntries, totalErrors int
 	for i, r := range cfg.Roots {
@@ -142,7 +217,6 @@ func runIndex(args []string) error {
 		totalEntries += st.Entries
 		totalErrors += st.Errors
 	}
-	_ = shards
 	fmt.Fprintf(os.Stderr, "%d roots, %d entries total, %d errors\n", len(cfg.Roots), totalEntries, totalErrors)
 	return nil
 }
@@ -222,6 +296,20 @@ func runRootRemove(path string) error {
 		return err
 	}
 
+	// Resolve the root's canonical path before it's dropped from cfg, so the
+	// snapshot file (hashed on the normalized path) can be found.
+	expanded, err := config.ExpandTilde(path)
+	if err != nil {
+		return err
+	}
+	var snapPath string
+	for _, r := range cfg.Roots {
+		if r.Path == path || r.Path == expanded {
+			snapPath = r.Path
+			break
+		}
+	}
+
 	removed, err := cfg.RemoveRoot(path)
 	if err != nil {
 		return err
@@ -233,6 +321,13 @@ func runRootRemove(path string) error {
 	if err := config.Save(cfgPath, cfg); err != nil {
 		return err
 	}
+
+	if snapPath != "" {
+		if err := snapshot.Remove(snapPath); err != nil {
+			fmt.Fprintf(os.Stderr, "scry: warning: could not remove snapshot for %s: %v\n", snapPath, err)
+		}
+	}
+
 	fmt.Printf("removed %s\n", path)
 	return nil
 }
@@ -247,7 +342,7 @@ func runRootList() error {
 		return nil
 	}
 
-	shards, stats := crawlAll(cfg)
+	shards, _, _ := loadOrCrawlAll(cfg)
 
 	type row struct {
 		path    string
@@ -256,9 +351,13 @@ func runRootList() error {
 	}
 	rowsList := make([]row, len(cfg.Roots))
 	for i, r := range cfg.Roots {
+		entries := 0
+		if shards[i] != nil {
+			entries = shards[i].Len()
+		}
 		rowsList[i] = row{
 			path:    r.Path,
-			entries: stats[i].Entries,
+			entries: entries,
 			online:  shards[i] != nil && shards[i].Online(),
 		}
 	}
@@ -270,6 +369,63 @@ func runRootList() error {
 			status = "offline"
 		}
 		fmt.Printf("%s\t%d entries\t%s\n", rw.path, rw.entries, status)
+	}
+	return nil
+}
+
+// runStatus implements `scry status`: per configured root, the live entry
+// count, and the on-disk snapshot's size and modification time (if a
+// snapshot exists yet).
+func runStatus(args []string) error {
+	cfg, _, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	if len(cfg.Roots) == 0 {
+		fmt.Println("no roots configured")
+		return nil
+	}
+
+	shards, _, _ := loadOrCrawlAll(cfg)
+
+	type row struct {
+		path       string
+		entries    int
+		online     bool
+		snapExists bool
+		snapSize   int64
+		snapMTime  time.Time
+	}
+	rowsList := make([]row, len(cfg.Roots))
+	for i, r := range cfg.Roots {
+		rw := row{path: r.Path}
+		if shards[i] != nil {
+			rw.entries = shards[i].Len()
+			rw.online = shards[i].Online()
+		}
+
+		if path, err := snapshot.PathFor(r.Path); err == nil {
+			if fi, err := os.Stat(path); err == nil {
+				rw.snapExists = true
+				rw.snapSize = fi.Size()
+				rw.snapMTime = fi.ModTime()
+			}
+		}
+		rowsList[i] = rw
+	}
+	sort.Slice(rowsList, func(i, j int) bool { return rowsList[i].path < rowsList[j].path })
+
+	for _, rw := range rowsList {
+		status := "online"
+		if !rw.online {
+			status = "offline"
+		}
+		if !rw.snapExists {
+			fmt.Printf("%s\t%d entries\t%s\tno snapshot\n", rw.path, rw.entries, status)
+			continue
+		}
+		fmt.Printf("%s\t%d entries\t%s\tsnapshot %d bytes, %s\n",
+			rw.path, rw.entries, status, rw.snapSize, rw.snapMTime.Format(time.RFC3339))
 	}
 	return nil
 }

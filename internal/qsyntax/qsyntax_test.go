@@ -1,6 +1,7 @@
 package qsyntax
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -143,7 +144,12 @@ func TestMatchGlobBaseNameOnly(t *testing.T) {
 		t.Error("main.go should match *.go")
 	}
 	// The glob must not match against a path — only the base name.
-	if q.MatchName(`src\main.go`) {
+	//
+	// The separator has to come from the OS rather than being written as a
+	// literal backslash: on darwin a backslash is filepath.Match's escape
+	// character, not a separator, so `src\main.go` is one unremarkable base
+	// name there and the assertion means nothing.
+	if q.MatchName("src" + string(filepath.Separator) + "main.go") {
 		t.Error("*.go should not match a base name that itself embeds a separator")
 	}
 }

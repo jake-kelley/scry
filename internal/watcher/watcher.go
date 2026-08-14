@@ -334,6 +334,11 @@ func relParts(root, path string) ([]string, bool) {
 // is excluded because node_modules is, exactly as a full crawl would skip
 // it (§6: "a newly created node_modules must not get indexed").
 func pathExcluded(root string, path string, opts crawler.Options) bool {
+	// Anchored excludes are checked against the whole path, which already
+	// covers everything underneath them — no need to walk components.
+	if crawler.MatchesExcludePath(path, opts.ExcludePaths) {
+		return true
+	}
 	parts, ok := relParts(root, path)
 	if !ok {
 		return true

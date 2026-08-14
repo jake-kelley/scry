@@ -239,3 +239,86 @@ func TestCrawlRootPath(t *testing.T) {
 		t.Errorf("Root() = %q, want %q", shard.Root(), abs)
 	}
 }
+
+// TestCrawlExcludePathIsAnchored is the distinction that motivated
+// ExcludePaths existing at all: excluding one specific directory must not
+// also exclude every same-named directory elsewhere in the tree, which is
+// exactly what a base-name exclude would have done.
+func TestCrawlExcludePathIsAnchored(t *testing.T) {
+	root := t.TempDir()
+	mustMkdir(t, filepath.Join(root, "Library", "Caches"))
+	mustWrite(t, filepath.Join(root, "Library", "Caches", "junk.dat"), "x")
+	mustMkdir(t, filepath.Join(root, "code", "proj", "Library"))
+	mustWrite(t, filepath.Join(root, "code", "proj", "Library", "keep.go"), "package p")
+	mustWrite(t, filepath.Join(root, "notes.txt"), "hi")
+
+	shard, stats, err := Crawl(root, Options{
+		ExcludePaths: []string{filepath.Join(root, "Library")},
+	})
+	if err != nil {
+		t.Fatalf("Crawl: %v", err)
+	}
+
+	if _, ok := findByName(shard, "junk.dat"); ok {
+		t.Error("junk.dat under the excluded path was indexed")
+	}
+	if _, ok := findByName(shard, "Caches"); ok {
+		t.Error("Caches under the excluded path was indexed")
+	}
+	if _, ok := findByName(shard, "keep.go"); !ok {
+		t.Error("keep.go under a same-named but different directory was excluded; " +
+			"ExcludePaths must be anchored, not matched by base name")
+	}
+	if _, ok := findByName(shard, "notes.txt"); !ok {
+		t.Error("notes.txt outside the excluded path was not indexed")
+	}
+	if stats.Skipped == 0 {
+		t.Error("expected the excluded directory to count as skipped")
+	}
+}
+
+func TestMatchesExcludePath(t *testing.T) {
+	base := filepath.Join(string(filepath.Separator), "Users", "me")
+	lib := filepath.Join(base, "Library")
+
+	cases := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{"the excluded directory itself", lib, true},
+		{"a child of it", filepath.Join(lib, "Caches"), true},
+		{"a deep descendant", filepath.Join(lib, "Caches", "scry", "shards"), true},
+		{"trailing-slash and dot noise still match", filepath.Join(lib, "Caches", "."), true},
+		{"a sibling sharing a prefix", filepath.Join(base, "LibraryOfCongress"), false},
+		{"a same-named dir elsewhere", filepath.Join(base, "code", "Library"), false},
+		{"the parent", base, false},
+		{"an unrelated path", filepath.Join(base, "Documents", "notes.txt"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := MatchesExcludePath(tc.path, []string{lib}); got != tc.want {
+				t.Errorf("MatchesExcludePath(%q, [%q]) = %v, want %v", tc.path, lib, got, tc.want)
+			}
+		})
+	}
+
+	if MatchesExcludePath(lib, nil) {
+		t.Error("no exclude paths configured must never match")
+	}
+	if MatchesExcludePath(lib, []string{""}) {
+		t.Error("an empty exclude path must not match everything")
+	}
+}
+
+// TestMatchesExcludePathCaseFolding pins the platform-dependent half:
+// darwin and windows compare paths case-insensitively, linux does not.
+func TestMatchesExcludePathCaseFolding(t *testing.T) {
+	lib := filepath.Join(string(filepath.Separator), "Users", "me", "Library")
+	shouted := filepath.Join(string(filepath.Separator), "Users", "me", "LIBRARY", "Caches")
+
+	want := runtime.GOOS == "darwin" || runtime.GOOS == "windows"
+	if got := MatchesExcludePath(shouted, []string{lib}); got != want {
+		t.Errorf("MatchesExcludePath(%q, [%q]) = %v, want %v on %s", shouted, lib, got, want, runtime.GOOS)
+	}
+}

@@ -175,6 +175,7 @@ path = "~/Documents"
 [[root]]
 path = "~/code"
 exclude = ["target", "vendor"]      # in addition to the global list
+exclude_paths = ["~/code/scratch"]  # one specific tree, not a name
 
 [[root]]
 path = "/Volumes/Archive"
@@ -183,11 +184,26 @@ offline_policy = "keep"             # keep | drop — behaviour when unmounted
 [exclude]                            # applied to every root
 names = ["node_modules", ".git", ".venv", "__pycache__", "build", "dist"]
 globs = ["*.tmp", "*.o", "*.pyc"]
+paths = ["~/Library"]                # anchored: this directory only
 
 [index]
 follow_symlinks = false
 hidden = false
 ```
+
+**`names`/`globs` versus `paths`.** `names` and `globs` match a *base name*, so
+they skip every matching directory anywhere in the tree — right for
+`node_modules`, wrong when you mean one particular directory. `paths` entries are
+*anchored*: each names a single absolute (or `~`-prefixed) location and excludes
+it along with everything under it. Excluding `~/Library` as a `name` would also
+lose `~/Pictures/Photos Library.photoslibrary` and any `Library/` inside a
+checked-out project; as a `path` it excludes exactly the one directory. A bare
+name in `paths` is rejected at load rather than silently matching nothing.
+
+**After any config change, use the menu bar's "Rebuild index"** (or restart the
+daemon with the cache cleared). A running daemon loads each root from a snapshot
+built under the *old* rules, so an edited exclude list otherwise has no visible
+effect until the next scheduled recrawl.
 
 Adding a root that is already contained in (or contains) an existing root collapses
 into the existing one — `scry root add` reports any roots absorbed this way.

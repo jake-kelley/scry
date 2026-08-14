@@ -91,6 +91,7 @@ func crawlOptions(cfg config.Config, r config.Root) crawler.Options {
 	return crawler.Options{
 		Excludes:       append(append([]string(nil), cfg.Exclude.Names...), r.Exclude...),
 		Globs:          cfg.Exclude.Globs,
+		ExcludePaths:   config.ExpandExcludePaths(cfg.Exclude.Paths, r.ExcludePaths),
 		FollowSymlinks: cfg.Index.FollowSymlinks,
 		Hidden:         cfg.Index.Hidden,
 	}

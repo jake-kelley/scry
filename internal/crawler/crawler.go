@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 type Options struct {
 	Excludes       []string // directory/file base names to skip entirely
 	Globs          []string // filepath.Match patterns (against base name) to skip
+	ExcludePaths   []string // absolute paths to skip, along with everything under them
 	FollowSymlinks bool     // if false (default), symlinks are indexed as leaves, never descended into
 	Hidden         bool     // if false (default), dotfiles and dot-directories are skipped
 }
@@ -90,7 +92,7 @@ func Crawl(root string, opts Options) (*index.Shard, Stats, error) {
 				}
 				return nil
 			}
-			if MatchesExclude(name, opts.Excludes, opts.Globs) {
+			if MatchesExclude(name, opts.Excludes, opts.Globs) || MatchesExcludePath(path, opts.ExcludePaths) {
 				stats.Skipped++
 				if isDir {
 					return fs.SkipDir
@@ -199,4 +201,56 @@ func MatchesExclude(name string, excludes, globs []string) bool {
 		}
 	}
 	return false
+}
+
+// caseInsensitivePaths mirrors internal/config's view of the filesystem:
+// darwin and windows compare paths case-insensitively by default. Declared
+// here rather than imported so internal/crawler keeps no dependency on the
+// config package.
+const caseInsensitivePaths = runtime.GOOS == "darwin" || runtime.GOOS == "windows"
+
+// MatchesExcludePath reports whether path is one of excludePaths or lives
+// underneath one of them.
+//
+// This is the anchored counterpart to MatchesExclude. A base-name exclude
+// of "Library" skips every directory called Library anywhere in the tree;
+// an exclude path of "/Users/me/Library" skips that one directory and its
+// contents and leaves "~/Pictures/Photos Library.photoslibrary" alone.
+// Both are useful, which is why both exist: names are the right tool for
+// node_modules, and paths for the handful of specific trees a user wants
+// out of their index.
+//
+// excludePaths are expected to be absolute and tilde-expanded already;
+// cmd/scry does that when it builds Options, so this stays a pure
+// comparison with no filesystem or environment access.
+func MatchesExcludePath(path string, excludePaths []string) bool {
+	if len(excludePaths) == 0 {
+		return false
+	}
+	clean := filepath.Clean(path)
+	for _, e := range excludePaths {
+		if e == "" {
+			continue
+		}
+		prefix := filepath.Clean(e)
+		if eqPath(clean, prefix) {
+			return true
+		}
+		// The trailing separator is what keeps "/a/bcd" from counting as
+		// being underneath "/a/bc".
+		if !strings.HasSuffix(prefix, string(filepath.Separator)) {
+			prefix += string(filepath.Separator)
+		}
+		if len(clean) > len(prefix) && eqPath(clean[:len(prefix)], prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func eqPath(a, b string) bool {
+	if caseInsensitivePaths {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
 }

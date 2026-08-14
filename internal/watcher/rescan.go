@@ -56,7 +56,8 @@ func rescanSubtree(shard *index.Shard, r Root, dirPath string) error {
 			}
 			return nil
 		}
-		if crawler.MatchesExclude(name, r.Opts.Excludes, r.Opts.Globs) {
+		if crawler.MatchesExclude(name, r.Opts.Excludes, r.Opts.Globs) ||
+			crawler.MatchesExcludePath(p, r.Opts.ExcludePaths) {
 			if d.IsDir() {
 				return fs.SkipDir
 			}

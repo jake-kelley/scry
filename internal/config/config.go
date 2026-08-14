@@ -17,13 +17,23 @@ import (
 type Root struct {
 	Path          string   `toml:"path"`
 	Exclude       []string `toml:"exclude"`        // additional to global
+	ExcludePaths  []string `toml:"exclude_paths"`  // additional to global
 	OfflinePolicy string   `toml:"offline_policy"` // "keep"|"drop", default "keep"
 }
 
 // Exclude holds the global exclusion rules applied to every root.
+//
+// Names and Globs match a base name, so they skip every directory with
+// that name anywhere in a tree — the right behaviour for node_modules and
+// the wrong behaviour for one specific directory. Paths are anchored:
+// each is a single absolute (or tilde-prefixed) location, excluded along
+// with everything under it. "~/Library" as a Path excludes exactly that
+// directory; as a Name it would also lose "~/Pictures/Photos
+// Library.photoslibrary" and any Library/ inside a checked-out project.
 type Exclude struct {
 	Names []string `toml:"names"`
 	Globs []string `toml:"globs"`
+	Paths []string `toml:"paths"`
 }
 
 // IndexOpts holds indexing behaviour options.
@@ -304,6 +314,12 @@ func (c Config) Validate() []error {
 				errs = append(errs, fmt.Errorf("config: root %q: invalid exclude glob %q: %w", r.Path, g, err))
 			}
 		}
+
+		for _, p := range r.ExcludePaths {
+			if err := validateExcludePath(p); err != nil {
+				errs = append(errs, fmt.Errorf("config: root %q: %w", r.Path, err))
+			}
+		}
 	}
 
 	for _, g := range c.Exclude.Globs {
@@ -312,7 +328,55 @@ func (c Config) Validate() []error {
 		}
 	}
 
+	for _, p := range c.Exclude.Paths {
+		if err := validateExcludePath(p); err != nil {
+			errs = append(errs, fmt.Errorf("config: %w", err))
+		}
+	}
+
 	return errs
+}
+
+// validateExcludePath rejects the two mistakes an anchored exclude invites:
+// leaving it empty, and writing a bare name like "Library" in the belief
+// that it will be matched anywhere. The second is a real trap, because
+// that spelling is valid in the neighbouring names list and silently
+// matches nothing here, so it is worth an error that names the other key.
+func validateExcludePath(p string) error {
+	if strings.TrimSpace(p) == "" {
+		return errors.New("exclude path is empty")
+	}
+	norm, err := ExpandTilde(p)
+	if err != nil {
+		return fmt.Errorf("exclude path %q: %w", p, err)
+	}
+	if !filepath.IsAbs(norm) {
+		return fmt.Errorf("exclude path %q must be absolute or start with ~ "+
+			"(it is anchored to one location; use [exclude] names for a base name matched anywhere)", p)
+	}
+	return nil
+}
+
+// ExpandExcludePaths tilde-expands and cleans each entry so callers can
+// hand the result straight to crawler.Options. Entries that cannot be
+// resolved are dropped rather than returned as errors: Validate already
+// reports those, and a crawl should not be aborted by one bad line in a
+// list whose other entries are fine.
+func ExpandExcludePaths(paths ...[]string) []string {
+	var out []string
+	for _, list := range paths {
+		for _, p := range list {
+			if strings.TrimSpace(p) == "" {
+				continue
+			}
+			norm, err := ExpandTilde(p)
+			if err != nil {
+				continue
+			}
+			out = append(out, filepath.Clean(norm))
+		}
+	}
+	return out
 }
 
 // AddRoot adds path as a new root, after expanding a leading tilde and

@@ -481,3 +481,78 @@ func TestValidateGoodConfigHasNoErrors(t *testing.T) {
 		t.Errorf("Validate() = %v, want no errors", errs)
 	}
 }
+
+func TestExcludePathsParseAndValidate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	content := `
+[[root]]
+  path = "~/code"
+  exclude_paths = ["~/code/vendor-dump"]
+
+[exclude]
+  names = ["node_modules"]
+  paths = ["~/Library"]
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Exclude.Paths; len(got) != 1 || got[0] != "~/Library" {
+		t.Errorf("global exclude paths = %v, want [~/Library] verbatim (expansion happens at use)", got)
+	}
+	if got := cfg.Roots[0].ExcludePaths; len(got) != 1 || got[0] != "~/code/vendor-dump" {
+		t.Errorf("per-root exclude paths = %v, want [~/code/vendor-dump]", got)
+	}
+	if errs := cfg.Validate(); len(errs) != 0 {
+		t.Errorf("Validate on a good config returned %v", errs)
+	}
+}
+
+// TestValidateRejectsRelativeExcludePath covers the trap the key invites:
+// "Library" is a valid spelling in [exclude] names and matches nothing at
+// all under [exclude] paths, so it has to be an error rather than a
+// silently ineffective line.
+func TestValidateRejectsRelativeExcludePath(t *testing.T) {
+	cfg := Default()
+	cfg.Roots = []Root{{Path: "/tmp/x"}}
+	cfg.Exclude.Paths = []string{"Library"}
+
+	errs := cfg.Validate()
+	if len(errs) == 0 {
+		t.Fatal("a bare name in [exclude] paths must be rejected, not silently ignored")
+	}
+	if !strings.Contains(errs[0].Error(), "absolute") {
+		t.Errorf("error should explain the path must be absolute, got: %v", errs[0])
+	}
+
+	cfg.Exclude.Paths = []string{"   "}
+	if errs := cfg.Validate(); len(errs) == 0 {
+		t.Error("an empty exclude path must be rejected")
+	}
+}
+
+func TestExpandExcludePaths(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("no home dir: %v", err)
+	}
+
+	got := ExpandExcludePaths([]string{"~/Library", ""}, []string{filepath.Join(home, "code") + string(filepath.Separator)})
+	want := []string{
+		filepath.Join(home, "Library"),
+		filepath.Join(home, "code"),
+	}
+	if len(got) != len(want) {
+		t.Fatalf("ExpandExcludePaths = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("ExpandExcludePaths[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}

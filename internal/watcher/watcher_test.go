@@ -438,3 +438,35 @@ func TestPersistIsCalledOnGracefulShutdown(t *testing.T) {
 		t.Fatalf("expected at least one Persist call on shutdown flush")
 	}
 }
+
+// TestExcludedPathContentsNeverIndexed is the live-event counterpart to
+// the crawler's anchored-exclude test: a file created under an excluded
+// path must be ignored, while a same-named directory elsewhere under the
+// root stays indexable. Without the ExcludePaths check in pathExcluded,
+// the crawl would skip ~/Library and FSEvents would quietly refill it.
+func TestExcludedPathContentsNeverIndexed(t *testing.T) {
+	root := t.TempDir()
+	excluded := filepath.Join(root, "Library")
+	opts := crawler.Options{ExcludePaths: []string{excluded}}
+	h := newHarness(t, root, opts)
+	defer h.stop()
+
+	inside := filepath.Join(excluded, "Caches", "junk.dat")
+	mustWrite(t, inside, "x")
+	h.stream.send(fsevents.Event{Path: inside, ID: 1, Flags: fsevents.FlagItemCreated})
+	h.settle()
+
+	if got := h.shardNow().Len(); got != 1 { // root only
+		t.Fatalf("Len() = %d, want 1 (contents of an excluded path must not be indexed)", got)
+	}
+
+	elsewhere := filepath.Join(root, "code", "Library", "keep.go")
+	mustWrite(t, elsewhere, "package p")
+	h.stream.send(fsevents.Event{Path: elsewhere, ID: 2, Flags: fsevents.FlagItemCreated})
+	h.settle()
+
+	if got := h.shardNow().Len(); got != 4 { // root + code + Library + keep.go
+		t.Fatalf("Len() = %d, want 4; a same-named directory outside the excluded "+
+			"path must still be indexed (ExcludePaths is anchored)", got)
+	}
+}

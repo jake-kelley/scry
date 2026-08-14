@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -197,7 +198,23 @@ func TestServeReturnsErrAlreadyRunningAgainstALiveDaemon(t *testing.T) {
 	// A second Serve at the same address must not steal the socket out
 	// from under the first: it should fail fast rather than falling back
 	// to a second, competing TCP listener.
-	err := Serve(context.Background(), addr, func(req Request) Response { return Response{} })
+	//
+	// Serve blocks in Accept when it wrongly succeeds, so this runs in a
+	// goroutine: the bug this guards against presents as a hang, and a
+	// hang costs the whole suite its 10 minute timeout instead of failing
+	// here. Cancelling the context unblocks the leaked Accept either way.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errc := make(chan error, 1)
+	go func() { errc <- Serve(ctx, addr, func(req Request) Response { return Response{} }) }()
+
+	var err error
+	select {
+	case err = <-errc:
+	case <-time.After(10 * time.Second):
+		t.Fatal("second Serve at the same address blocked instead of returning; it bound a competing listener")
+	}
 	if err == nil {
 		t.Fatal("second Serve at the same address succeeded, want ErrAlreadyRunning")
 	}
@@ -263,4 +280,124 @@ func TestTCPFallbackWhenUnixUnavailable(t *testing.T) {
 	if tcpAddr.IP.String() != "127.0.0.1" && !tcpAddr.IP.IsLoopback() {
 		t.Errorf("TCP fallback bound to non-loopback address %v", tcpAddr)
 	}
+}
+
+// forceTCPFallback makes the unix socket unbindable at addr, using the same
+// non-empty-directory trick as TestTCPFallbackWhenUnixUnavailable, so bind()
+// is guaranteed to take the TCP path on any platform.
+func forceTCPFallback(t *testing.T, addr Addr) {
+	t.Helper()
+	if err := os.MkdirAll(addr.sockPath(), 0o700); err != nil {
+		t.Fatalf("mkdir sock path: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(addr.sockPath(), "occupied"), nil, 0o600); err != nil {
+		t.Fatalf("write inside sock path: %v", err)
+	}
+}
+
+func TestSecondServeOnTCPFallbackReportsAlreadyRunning(t *testing.T) {
+	// The TCP counterpart of
+	// TestServeReturnsErrAlreadyRunningAgainstALiveDaemon. Worth its own
+	// test because binding 127.0.0.1:0 always succeeds, so nothing about
+	// the listener itself catches a second daemon — only the port-file
+	// probe does. Without it the second Serve silently overwrites the
+	// first's port file and both stay resident.
+	addr := Addr{CacheDir: t.TempDir()}
+	forceTCPFallback(t, addr)
+
+	stop := serveInBackground(t, addr, func(req Request) Response { return Response{} })
+	defer stop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errc := make(chan error, 1)
+	go func() { errc <- Serve(ctx, addr, func(req Request) Response { return Response{} }) }()
+
+	var err error
+	select {
+	case err = <-errc:
+	case <-time.After(10 * time.Second):
+		t.Fatal("second Serve blocked instead of returning; it bound a competing TCP listener")
+	}
+	if err == nil || !isErrAlreadyRunning(err) {
+		t.Fatalf("second Serve error = %v, want it to wrap ErrAlreadyRunning", err)
+	}
+}
+
+func TestTCPDaemonAliveRejectsForeignListener(t *testing.T) {
+	// An ephemeral port recorded by a crashed daemon can be reassigned to
+	// an unrelated process. Something answering the connection therefore
+	// isn't proof of a daemon — it has to speak the protocol. This listener
+	// accepts and then says nothing, which is what a foreign process
+	// looks like.
+	addr := Addr{CacheDir: t.TempDir()}
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer l.Close()
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			defer c.Close()
+		}
+	}()
+
+	port := l.Addr().(*net.TCPAddr).Port
+	if err := os.WriteFile(addr.portPath(), []byte(strconv.Itoa(port)), 0o600); err != nil {
+		t.Fatalf("write port file: %v", err)
+	}
+
+	if tcpDaemonAlive(addr) {
+		t.Error("tcpDaemonAlive = true for a listener that never speaks the protocol, want false")
+	}
+	if _, err := os.Stat(addr.portPath()); !os.IsNotExist(err) {
+		t.Error("a port file naming a foreign listener should have been removed")
+	}
+}
+
+func TestTCPDaemonAliveOnMissingAndJunkPortFiles(t *testing.T) {
+	t.Run("no port file", func(t *testing.T) {
+		addr := Addr{CacheDir: t.TempDir()}
+		if tcpDaemonAlive(addr) {
+			t.Error("tcpDaemonAlive = true with no port file, want false")
+		}
+	})
+
+	t.Run("unparseable port file is removed", func(t *testing.T) {
+		addr := Addr{CacheDir: t.TempDir()}
+		if err := os.WriteFile(addr.portPath(), []byte("not-a-port"), 0o600); err != nil {
+			t.Fatalf("write port file: %v", err)
+		}
+		if tcpDaemonAlive(addr) {
+			t.Error("tcpDaemonAlive = true for an unparseable port file, want false")
+		}
+		if _, err := os.Stat(addr.portPath()); !os.IsNotExist(err) {
+			t.Error("an unparseable port file should have been removed")
+		}
+	})
+
+	t.Run("dead port is removed", func(t *testing.T) {
+		addr := Addr{CacheDir: t.TempDir()}
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		port := l.Addr().(*net.TCPAddr).Port
+		l.Close() // nothing is listening on this port any more
+
+		if err := os.WriteFile(addr.portPath(), []byte(strconv.Itoa(port)), 0o600); err != nil {
+			t.Fatalf("write port file: %v", err)
+		}
+		if tcpDaemonAlive(addr) {
+			t.Error("tcpDaemonAlive = true for a dead port, want false")
+		}
+		if _, err := os.Stat(addr.portPath()); !os.IsNotExist(err) {
+			t.Error("a port file naming a dead port should have been removed, so a crash can't block a restart")
+		}
+	})
 }

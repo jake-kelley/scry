@@ -48,6 +48,12 @@ const (
 // check) waits to find out whether something is actually listening.
 const dialProbeTimeout = 500 * time.Millisecond
 
+// pingOp is a reserved op that serveConn answers itself, without ever
+// reaching the Handler. bind uses it to confirm that whatever answered on
+// a recorded TCP port is really a scry daemon and not an unrelated process
+// that happened to be assigned a recycled ephemeral port.
+const pingOp = "__ping"
+
 // Request is one call a client sends the daemon.
 type Request struct {
 	Op    string // "search", "status", "reindex", "stop"
@@ -166,7 +172,15 @@ func bind(addr Addr) (l net.Listener, usingUnix bool, err error) {
 	}
 
 	// AF_UNIX didn't work on this machine for some other reason — fall
-	// back to loopback TCP.
+	// back to loopback TCP. The already-running check has to be repeated
+	// here: binding 127.0.0.1:0 asks for an ephemeral port and therefore
+	// always succeeds, so without this a second daemon would start happily
+	// and overwrite the first one's port file, stranding it with a full
+	// index resident and no clients.
+	if tcpDaemonAlive(addr) {
+		return nil, false, fmt.Errorf("%w on the tcp port recorded at %s", ErrAlreadyRunning, addr.portPath())
+	}
+
 	l, err = net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, false, fmt.Errorf("ipc: listen: %w", err)
@@ -197,6 +211,50 @@ func bindUnix(path string) (net.Listener, error) {
 	return net.Listen("unix", path)
 }
 
+// tcpDaemonAlive reports whether addr's port file records a port that a
+// live scry daemon is still answering on. It is the TCP counterpart of
+// bindUnix's stale-socket probe, and it cleans up after a crashed daemon
+// the same way: a port file that names a dead port, or a port now owned by
+// some unrelated process, is removed and reported as not alive, so a crash
+// never permanently blocks a restart.
+//
+// Answering the connection is not enough to count as alive. Ephemeral
+// ports get recycled, so the process on the other end must also speak this
+// protocol — hence the pingOp round trip.
+func tcpDaemonAlive(addr Addr) bool {
+	data, err := os.ReadFile(addr.portPath())
+	if err != nil {
+		return false // no port file at all: nothing to conflict with
+	}
+
+	discard := func() bool {
+		os.Remove(addr.portPath())
+		return false
+	}
+
+	port := strings.TrimSpace(string(data))
+	if n, convErr := strconv.Atoi(port); convErr != nil || n <= 0 || n > 65535 {
+		return discard()
+	}
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", port), dialProbeTimeout)
+	if err != nil {
+		return discard()
+	}
+	defer conn.Close()
+
+	if err := conn.SetDeadline(time.Now().Add(dialProbeTimeout)); err != nil {
+		return discard()
+	}
+	if err := json.NewEncoder(conn).Encode(Request{Op: pingOp}); err != nil {
+		return discard()
+	}
+	var resp Response
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		return discard()
+	}
+	return true
+}
+
 // serveConn handles every Request on one connection until the client
 // disconnects or sends something that fails to decode as JSON.
 func serveConn(conn net.Conn, h Handler) {
@@ -207,6 +265,14 @@ func serveConn(conn net.Conn, h Handler) {
 		var req Request
 		if err := dec.Decode(&req); err != nil {
 			return
+		}
+		if req.Op == pingOp {
+			// Answered here so a liveness probe never reaches the
+			// Handler, which would otherwise log it as an unknown op.
+			if err := enc.Encode(Response{}); err != nil {
+				return
+			}
+			continue
 		}
 		resp := safeHandle(h, req)
 		if err := enc.Encode(resp); err != nil {

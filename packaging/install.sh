@@ -19,6 +19,24 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 	exit 1
 fi
 
+# Refusing sudo is not fussiness. scry installs a per-user LaunchAgent into
+# gui/$UID, and root has no GUI session to install one into: under sudo this
+# script gets all the way to the end and then fails with the distinctly
+# unhelpful "Bootstrap failed: 125: Domain does not support specified
+# action", having already dropped a root-owned scry.app in /Applications and
+# a plist in /var/root that the non-sudo re-run then trips over.
+if [[ "$(id -u)" -eq 0 ]]; then
+	cat >&2 <<-'EOF'
+		install.sh: do not run this with sudo -- run it as your normal user.
+		install.sh: scry installs a per-user LaunchAgent (gui/$UID). root has no
+		install.sh: GUI session, so launchctl cannot load it there.
+		install.sh: If a previous sudo run left artefacts, clear them first:
+		install.sh:   sudo rm -rf /Applications/scry.app
+		install.sh:   sudo rm -f /var/root/Library/LaunchAgents/com.jakekelley.scry.plist
+	EOF
+	exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LABEL="com.jakekelley.scry"
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
@@ -53,8 +71,28 @@ plutil -lint -s "$AGENT_PLIST"
 
 echo "install.sh: loading LaunchAgent"
 UID_GUI="gui/$(id -u)"
+# bootout returns before launchd has finished tearing the job down, so on a
+# re-install the bootstrap below can land while the domain still holds the
+# dying job and fail with "Bootstrap failed: 5: Input/output error". Wait for
+# the job to actually disappear, then retry the bootstrap regardless: the
+# unload is the common cause of a briefly-busy domain but not the only one.
 launchctl bootout "$UID_GUI/$LABEL" >/dev/null 2>&1 || true
-launchctl bootstrap "$UID_GUI" "$AGENT_PLIST"
+for _ in $(seq 1 20); do
+	launchctl print "$UID_GUI/$LABEL" >/dev/null 2>&1 || break
+	sleep 0.25
+done
+
+for attempt in $(seq 1 20); do
+	if launchctl bootstrap "$UID_GUI" "$AGENT_PLIST" 2>/dev/null; then
+		break
+	fi
+	if [[ "$attempt" -eq 20 ]]; then
+		echo "install.sh: launchctl bootstrap kept failing; re-running it to show the error:" >&2
+		launchctl bootstrap "$UID_GUI" "$AGENT_PLIST"
+		exit 1
+	fi
+	sleep 0.25
+done
 launchctl enable "$UID_GUI/$LABEL"
 
 echo "install.sh: done"

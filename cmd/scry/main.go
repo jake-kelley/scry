@@ -19,6 +19,8 @@ import (
 	"scry/internal/config"
 	"scry/internal/crawler"
 	"scry/internal/index"
+	"scry/internal/ipc"
+	"scry/internal/qsyntax"
 	"scry/internal/query"
 	"scry/internal/roots"
 	"scry/internal/snapshot"
@@ -33,7 +35,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: scry <query> | scry root add/rm/list | scry index | scry status")
+		return fmt.Errorf("usage: scry <query> | scry root add/rm/list | scry index | scry status | scry daemon | scry stop")
 	}
 
 	switch args[0] {
@@ -43,9 +45,24 @@ func run(args []string) error {
 		return runIndex(args[1:])
 	case "status":
 		return runStatus(args[1:])
+	case "daemon":
+		return runDaemon(args[1:])
+	case "stop":
+		return runStop(args[1:])
 	default:
 		return runSearch(args)
 	}
+}
+
+// ipcAddr resolves the daemon's socket address from the default cache
+// directory. Every command that talks to the daemon goes through this, so
+// there is exactly one place that decides where the socket lives.
+func ipcAddr() (ipc.Addr, error) {
+	dir, err := config.CacheDir()
+	if err != nil {
+		return ipc.Addr{}, err
+	}
+	return ipc.Addr{CacheDir: dir}, nil
 }
 
 // loadConfig loads scry's config file from its default location.
@@ -167,9 +184,23 @@ func loadOrCrawlAll(cfg config.Config) (shards []*index.Shard, stats []crawler.S
 	return shards, stats, loaded
 }
 
-// runSearch implements `scry <query>`.
+// runSearch implements `scry <query>`: try the resident daemon over the
+// socket first (§7 — every UI path should go through it), and only fall
+// back to the in-process crawl-or-load path when no daemon answers.
 func runSearch(args []string) error {
 	q := args[0]
+
+	if results, ok, err := searchViaDaemon(q); ok {
+		if err != nil {
+			return err
+		}
+		for _, r := range results {
+			fmt.Printf("%d\t%s\n", r.Score, r.Path)
+		}
+		fmt.Fprintf(os.Stderr, "via daemon, %d results\n", len(results))
+		return nil
+	}
+	fmt.Fprintln(os.Stderr, "scry: no daemon running; falling back to in-process search")
 
 	cfg, _, err := loadConfig()
 	if err != nil {
@@ -179,19 +210,73 @@ func runSearch(args []string) error {
 		return fmt.Errorf("no roots configured; run `scry root add <path>` first")
 	}
 
-	crawlStart := time.Now()
-	shards, _, _ := loadOrCrawlAll(cfg)
-	crawlDur := time.Since(crawlStart)
+	loadStart := time.Now()
+	shards, _, loaded := loadOrCrawlAll(cfg)
+	loadDur := time.Since(loadStart)
+
+	parsed, err := qsyntax.Parse(q)
+	if err != nil {
+		return err
+	}
 
 	queryStart := time.Now()
-	results := query.Search(shards, q, 0)
+	results := query.Search(shards, parsed, 0)
 	queryDur := time.Since(queryStart)
 
 	for _, r := range results {
 		fmt.Printf("%d\t%s\n", r.Score, r.Path)
 	}
-	fmt.Fprintf(os.Stderr, "crawl %s, query %s, %d results\n", crawlDur, queryDur, len(results))
+	fmt.Fprintf(os.Stderr, "%s, query %s, %d results\n", loadLabel(loaded, loadDur), queryDur, len(results))
 	return nil
+}
+
+// searchViaDaemon runs q against a running daemon over the socket, if one
+// is listening. ok reports whether a daemon was found at all — the caller
+// should fall back to the in-process path only when ok is false; if ok is
+// true and err is non-nil, that is a real error from an already-contacted
+// daemon, not a "no daemon" condition, and should be reported as-is.
+func searchViaDaemon(q string) (results []query.Result, ok bool, err error) {
+	addr, err := ipcAddr()
+	if err != nil {
+		return nil, false, nil
+	}
+	c, err := ipc.Dial(addr)
+	if err != nil {
+		return nil, false, nil
+	}
+	defer c.Close()
+
+	resp, err := c.Call(ipc.Request{Op: "search", Query: q})
+	if err != nil {
+		return nil, true, fmt.Errorf("daemon: %w", err)
+	}
+	if resp.Err != "" {
+		return nil, true, fmt.Errorf("daemon: %s", resp.Err)
+	}
+	return resp.Results, true, nil
+}
+
+// loadLabel describes, honestly, how the shards backing a search were
+// obtained: loaded from an on-disk snapshot (the fast path phase 5 exists
+// for), freshly crawled (a root with no valid snapshot yet), or a mix of
+// both. This exists so a mislabeled timing line can never again claim
+// "crawl" for what was actually a snapshot load, or vice versa.
+func loadLabel(loaded []bool, dur time.Duration) string {
+	total := len(loaded)
+	loadedCount := 0
+	for _, l := range loaded {
+		if l {
+			loadedCount++
+		}
+	}
+	switch loadedCount {
+	case total:
+		return fmt.Sprintf("loaded from snapshot in %s", dur)
+	case 0:
+		return fmt.Sprintf("crawled in %s", dur)
+	default:
+		return fmt.Sprintf("loaded %d/%d roots from snapshot, crawled the rest, in %s", loadedCount, total, dur)
+	}
 }
 
 // runIndex implements `scry index`: force a fresh crawl of every configured
@@ -375,8 +460,29 @@ func runRootList() error {
 
 // runStatus implements `scry status`: per configured root, the live entry
 // count, and the on-disk snapshot's size and modification time (if a
-// snapshot exists yet).
+// snapshot exists yet). Tries the daemon over the socket first, per §7;
+// falls back to loading (or crawling) every root in-process only when no
+// daemon answers.
 func runStatus(args []string) error {
+	if addr, err := ipcAddr(); err == nil {
+		if c, dialErr := ipc.Dial(addr); dialErr == nil {
+			defer c.Close()
+			resp, callErr := c.Call(ipc.Request{Op: "status"})
+			if callErr != nil {
+				return fmt.Errorf("daemon: %w", callErr)
+			}
+			if resp.Err != "" {
+				return fmt.Errorf("daemon: %s", resp.Err)
+			}
+			if len(resp.Stats.Roots) == 0 {
+				fmt.Println("no roots configured")
+				return nil
+			}
+			printStatusRows(resp.Stats.Roots)
+			return nil
+		}
+	}
+
 	cfg, _, err := loadConfig()
 	if err != nil {
 		return err
@@ -387,45 +493,49 @@ func runStatus(args []string) error {
 	}
 
 	shards, _, _ := loadOrCrawlAll(cfg)
+	printStatusRows(statusRows(cfg, shards))
+	return nil
+}
 
-	type row struct {
-		path       string
-		entries    int
-		online     bool
-		snapExists bool
-		snapSize   int64
-		snapMTime  time.Time
-	}
-	rowsList := make([]row, len(cfg.Roots))
+// statusRows builds one ipc.RootStatus per configured root from shards
+// already resident (loaded or crawled) plus each root's on-disk snapshot
+// metadata. Shared between the in-process `scry status` path and the
+// daemon's "status" op handler so the two never drift apart.
+func statusRows(cfg config.Config, shards []*index.Shard) []ipc.RootStatus {
+	rows := make([]ipc.RootStatus, len(cfg.Roots))
 	for i, r := range cfg.Roots {
-		rw := row{path: r.Path}
+		rw := ipc.RootStatus{Path: r.Path}
 		if shards[i] != nil {
-			rw.entries = shards[i].Len()
-			rw.online = shards[i].Online()
+			rw.Entries = shards[i].Len()
+			rw.Online = shards[i].Online()
 		}
 
 		if path, err := snapshot.PathFor(r.Path); err == nil {
 			if fi, err := os.Stat(path); err == nil {
-				rw.snapExists = true
-				rw.snapSize = fi.Size()
-				rw.snapMTime = fi.ModTime()
+				rw.SnapshotExists = true
+				rw.SnapshotSize = fi.Size()
+				rw.SnapshotMTime = fi.ModTime()
 			}
 		}
-		rowsList[i] = rw
+		rows[i] = rw
 	}
-	sort.Slice(rowsList, func(i, j int) bool { return rowsList[i].path < rowsList[j].path })
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Path < rows[j].Path })
+	return rows
+}
 
-	for _, rw := range rowsList {
+// printStatusRows prints statusRows' output in `scry status`'s stable
+// text format, whether it came from the daemon or the in-process fallback.
+func printStatusRows(rows []ipc.RootStatus) {
+	for _, rw := range rows {
 		status := "online"
-		if !rw.online {
+		if !rw.Online {
 			status = "offline"
 		}
-		if !rw.snapExists {
-			fmt.Printf("%s\t%d entries\t%s\tno snapshot\n", rw.path, rw.entries, status)
+		if !rw.SnapshotExists {
+			fmt.Printf("%s\t%d entries\t%s\tno snapshot\n", rw.Path, rw.Entries, status)
 			continue
 		}
 		fmt.Printf("%s\t%d entries\t%s\tsnapshot %d bytes, %s\n",
-			rw.path, rw.entries, status, rw.snapSize, rw.snapMTime.Format(time.RFC3339))
+			rw.Path, rw.Entries, status, rw.SnapshotSize, rw.SnapshotMTime.Format(time.RFC3339))
 	}
-	return nil
 }

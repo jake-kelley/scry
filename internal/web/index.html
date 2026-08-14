@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>scry</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1b1b1f;
+    --dim: #6b6b76;
+    --border: #e2e2e8;
+    --hover: #f0f0f4;
+    --selected: #dbe6ff;
+    --accent: #3a5ceb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17181c;
+      --fg: #e7e7ec;
+      --dim: #91929c;
+      --border: #2c2d33;
+      --hover: #232429;
+      --selected: #223055;
+      --accent: #6f8dff;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  body {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 4vh 1rem 2rem;
+  }
+  #wrap {
+    width: 100%;
+    max-width: 720px;
+  }
+  #q {
+    width: 100%;
+    font-size: 1.3rem;
+    padding: 0.65rem 0.9rem;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg);
+    outline: none;
+  }
+  #q:focus {
+    border-color: var(--accent);
+  }
+  #status {
+    margin: 0.4rem 0.2rem;
+    font-size: 0.8rem;
+    color: var(--dim);
+    min-height: 1.1em;
+  }
+  #results {
+    list-style: none;
+    margin: 0.3rem 0 0;
+    padding: 0;
+    border-radius: 10px;
+    overflow: hidden;
+    border: 1px solid transparent;
+  }
+  #results:not(:empty) {
+    border-color: var(--border);
+  }
+  li {
+    padding: 0.5rem 0.9rem;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+  }
+  li:last-child { border-bottom: none; }
+  li:hover { background: var(--hover); }
+  li.selected { background: var(--selected); }
+  .name { font-size: 0.95rem; }
+  .dir::before { content: "\1F4C1 "; opacity: 0.7; }
+  .path {
+    font-size: 0.78rem;
+    color: var(--dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .meta {
+    float: right;
+    font-size: 0.75rem;
+    color: var(--dim);
+  }
+  #hint {
+    margin-top: 0.6rem;
+    font-size: 0.75rem;
+    color: var(--dim);
+    text-align: center;
+  }
+  kbd {
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0 0.3em;
+    font-family: inherit;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <input id="q" type="text" autofocus autocomplete="off" spellcheck="false" placeholder="Search…">
+  <div id="status"></div>
+  <ul id="results"></ul>
+  <div id="hint"><kbd>&uarr;</kbd><kbd>&darr;</kbd> to move &nbsp; <kbd>Enter</kbd> to copy path</div>
+</div>
+<script>
+(function () {
+  "use strict";
+
+  var input = document.getElementById("q");
+  var list = document.getElementById("results");
+  var status = document.getElementById("status");
+
+  var debounceMs = 50;
+  var timer = null;
+  var selected = -1;
+  var results = [];
+  var inflight = null;
+
+  function fmtSize(n) {
+    if (n < 1024) return n + " B";
+    var units = ["KB", "MB", "GB", "TB"];
+    var v = n;
+    for (var i = 0; i < units.length; i++) {
+      v = v / 1024;
+      if (v < 1024) return v.toFixed(v < 10 ? 1 : 0) + " " + units[i];
+    }
+    return v.toFixed(0) + " PB";
+  }
+
+  function fmtTime(ns) {
+    if (!ns) return "";
+    var d = new Date(ns / 1e6);
+    return d.toLocaleDateString() + " " + d.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+  }
+
+  function render() {
+    list.innerHTML = "";
+    results.forEach(function (r, i) {
+      var li = document.createElement("li");
+      if (i === selected) li.className = "selected";
+
+      var meta = document.createElement("span");
+      meta.className = "meta";
+      meta.textContent = (r.isDir ? "" : fmtSize(r.size) + " · ") + fmtTime(r.mtime);
+      li.appendChild(meta);
+
+      var name = document.createElement("div");
+      name.className = "name" + (r.isDir ? " dir" : "");
+      name.textContent = r.name;
+      li.appendChild(name);
+
+      var path = document.createElement("div");
+      path.className = "path";
+      path.textContent = r.path;
+      li.appendChild(path);
+
+      li.addEventListener("mouseenter", function () {
+        selected = i;
+        render();
+      });
+      li.addEventListener("click", function () {
+        copyPath(r.path);
+      });
+
+      list.appendChild(li);
+    });
+  }
+
+  function copyPath(path) {
+    if (!path) return;
+    var done = function () {
+      status.textContent = "copied: " + path;
+    };
+    var fail = function () {
+      status.textContent = path;
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(path).then(done, fail);
+    } else {
+      var ta = document.createElement("textarea");
+      ta.value = path;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        document.execCommand("copy");
+        done();
+      } catch (e) {
+        fail();
+      }
+      document.body.removeChild(ta);
+    }
+  }
+
+  function runSearch() {
+    var q = input.value;
+    if (q === "") {
+      results = [];
+      selected = -1;
+      status.textContent = "";
+      render();
+      return;
+    }
+
+    if (inflight) inflight.abort();
+    var ctrl = new AbortController();
+    inflight = ctrl;
+
+    fetch("/search?q=" + encodeURIComponent(q), {signal: ctrl.signal})
+      .then(function (resp) { return resp.json(); })
+      .then(function (data) {
+        if (ctrl.signal.aborted) return;
+        results = Array.isArray(data) ? data : [];
+        selected = results.length > 0 ? 0 : -1;
+        status.textContent = results.length + " result" + (results.length === 1 ? "" : "s");
+        render();
+      })
+      .catch(function (err) {
+        if (ctrl.signal.aborted) return;
+        status.textContent = "search failed";
+      });
+  }
+
+  input.addEventListener("input", function () {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(runSearch, debounceMs);
+  });
+
+  input.addEventListener("keydown", function (e) {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      if (results.length === 0) return;
+      selected = (selected + 1) % results.length;
+      render();
+      scrollSelectedIntoView();
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      if (results.length === 0) return;
+      selected = (selected - 1 + results.length) % results.length;
+      render();
+      scrollSelectedIntoView();
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (selected >= 0 && selected < results.length) {
+        copyPath(results[selected].path);
+      }
+    }
+  });
+
+  function scrollSelectedIntoView() {
+    var el = list.children[selected];
+    if (el) el.scrollIntoView({block: "nearest"});
+  }
+})();
+</script>
+</body>
+</html>

@@ -8,6 +8,7 @@ package integration
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"scry/internal/crawler"
@@ -48,7 +49,10 @@ func TestCrawlThenSearchFindsExpectedFileFirst(t *testing.T) {
 		t.Fatal("expected some entries to be crawled")
 	}
 
-	results := query.Search([]*index.Shard{shard}, "report", 10)
+	results, err := query.SearchString([]*index.Shard{shard}, "report", 10)
+	if err != nil {
+		t.Fatalf("SearchString: %v", err)
+	}
 	if len(results) == 0 {
 		t.Fatal("expected at least one result for query \"report\"")
 	}
@@ -81,8 +85,108 @@ func TestCrawlThenSearchAcrossMultipleShards(t *testing.T) {
 		t.Fatalf("Crawl rootB: %v", err)
 	}
 
-	results := query.Search([]*index.Shard{shardA, shardB}, "pdf", 10)
+	results, err := query.SearchString([]*index.Shard{shardA, shardB}, "pdf", 10)
+	if err != nil {
+		t.Fatalf("SearchString: %v", err)
+	}
 	if len(results) != 2 {
 		t.Fatalf("len(results) = %d, want 2 (one per shard)", len(results))
 	}
+}
+
+// TestQuerySyntaxFiltersAgainstRealTree crawls a real temp directory tree
+// and checks that each qsyntax filter shrinks Search's results the way its
+// package doc promises, against actually-crawled entries rather than
+// hand-built shards.
+func TestQuerySyntaxFiltersAgainstRealTree(t *testing.T) {
+	root := t.TempDir()
+
+	mustMkdir(t, filepath.Join(root, "src"))
+	mustMkdir(t, filepath.Join(root, "vendor"))
+	mustWrite(t, filepath.Join(root, "src", "main.go"), "x")
+	mustWrite(t, filepath.Join(root, "src", "main.rs"), "x")
+	mustWrite(t, filepath.Join(root, "src", "notes.txt"), "x")
+	mustWrite(t, filepath.Join(root, "vendor", "main.go"), "x")
+
+	shard, _, err := crawler.Crawl(root, crawler.Options{})
+	if err != nil {
+		t.Fatalf("Crawl: %v", err)
+	}
+	shards := []*index.Shard{shard}
+
+	t.Run("ext filter shrinks to matching extension only", func(t *testing.T) {
+		results, err := query.SearchString(shards, "ext:go", 10)
+		if err != nil {
+			t.Fatalf("SearchString: %v", err)
+		}
+		if len(results) != 2 {
+			t.Fatalf("len(results) = %d, want 2 (both main.go files), got %+v", len(results), results)
+		}
+		for _, r := range results {
+			if filepath.Ext(r.Path) != ".go" {
+				t.Errorf("ext:go leaked a non-.go result: %+v", r)
+			}
+		}
+	})
+
+	t.Run("path filter matches the full path, not just the base name", func(t *testing.T) {
+		// notes.txt's own name never mentions "vendor" — only its full
+		// path does not contain it either, so this also proves path:
+		// checks the reconstructed path and not just each candidate's
+		// base name: vendor/main.go's path contains "vendor" and matches,
+		// notes.txt's does not.
+		results, err := query.SearchString(shards, "path:vendor/main", 10)
+		if err != nil {
+			t.Fatalf("SearchString: %v", err)
+		}
+		if len(results) != 1 {
+			t.Fatalf("len(results) = %d, want 1, got %+v", len(results), results)
+		}
+		if filepath.Base(filepath.Dir(results[0].Path)) != "vendor" {
+			t.Errorf("path:vendor/main matched a file outside vendor/: %+v", results[0])
+		}
+	})
+
+	t.Run("negation excludes the negated term", func(t *testing.T) {
+		// A negated *fuzzy* term only excludes by base name (see
+		// internal/qsyntax's package doc), so excluding vendor/ paths
+		// specifically needs a negated path: term, not a negated fuzzy
+		// term — this is what actually reaches into a subdirectory by
+		// full path rather than by name.
+		results, err := query.SearchString(shards, "main !path:vendor", 10)
+		if err != nil {
+			t.Fatalf("SearchString: %v", err)
+		}
+		for _, r := range results {
+			if strings.Contains(filepath.ToSlash(r.Path), "/vendor/") {
+				t.Errorf("!path:vendor did not exclude a result under vendor/: %+v", r)
+			}
+		}
+		if len(results) == 0 {
+			t.Fatal("expected at least one main.* result outside vendor/")
+		}
+	})
+
+	t.Run("root filter restricts which shard is searched", func(t *testing.T) {
+		other := t.TempDir()
+		mustWrite(t, filepath.Join(other, "unrelated.go"), "x")
+		otherShard, _, err := crawler.Crawl(other, crawler.Options{})
+		if err != nil {
+			t.Fatalf("Crawl other: %v", err)
+		}
+
+		rootBase := filepath.Base(root)
+		results, err := query.SearchString([]*index.Shard{shard, otherShard}, "root:"+rootBase+" main", 10)
+		if err != nil {
+			t.Fatalf("SearchString: %v", err)
+		}
+		if len(results) == 0 {
+			t.Fatal("expected results from the root-filtered shard")
+		}
+		for _, r := range results {
+			if !strings.HasPrefix(filepath.ToSlash(r.Path), filepath.ToSlash(root)) {
+				t.Errorf("root:%s leaked a result from another shard: %+v", rootBase, r)
+			}
+		}
+	})
 }

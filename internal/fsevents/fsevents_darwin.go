@@ -80,6 +80,7 @@ import "C"
 import (
 	"runtime"
 	"sync"
+	"time"
 	"unsafe"
 )
 
@@ -233,9 +234,29 @@ func (s *darwinStream) Events() <-chan Event { return s.events }
 // it was scheduled on, exactly as CoreServices expects, and closes the
 // events channel once no more callbacks can fire. Stop blocks until that
 // teardown has finished.
+//
+// CFRunLoopStop is a documented no-op if the target run loop is not
+// actually inside CFRunLoopRun yet — and NewStream returns as soon as the
+// stream is created, not once CFRunLoopRun has been entered on its
+// goroutine. A Stop called immediately after NewStream can therefore race
+// a CFRunLoopRun that has not started, land as a no-op, and hang forever
+// waiting on s.done. Retrying the stop signal on a short tick until the
+// run loop actually exits closes that window deterministically instead of
+// depending on timing.
 func (s *darwinStream) Stop() {
 	s.stopOnce.Do(func() {
-		C.CFRunLoopStop(s.rl)
+		go func() {
+			ticker := time.NewTicker(2 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				C.CFRunLoopStop(s.rl)
+				select {
+				case <-s.done:
+					return
+				case <-ticker.C:
+				}
+			}
+		}()
 	})
 	<-s.done
 }

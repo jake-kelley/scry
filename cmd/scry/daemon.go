@@ -151,6 +151,49 @@ func handleRequest(d *daemonState, cancel context.CancelFunc) ipc.Handler {
 	}
 }
 
+// startCore does everything both `scry daemon` and `scry menubar` need
+// before they diverge: load every configured root from its snapshot
+// (crawling only what's missing or stale), build the daemonState, and
+// start the recrawl Scheduler and FSEvents watcher against ctx. It does
+// not start the IPC socket or the web UI — callers do that themselves,
+// because runDaemon blocks on ipc.Serve directly while runMenubar (see
+// menubar.go) has to start it as a goroutine so systray.Run can own the
+// main thread instead, per §7's "single biggest structural consequence."
+func startCore(ctx context.Context, cfg config.Config, logPrefix string) (*daemonState, error) {
+	loadStart := time.Now()
+	shards, _, loaded := loadOrCrawlAll(cfg)
+	fmt.Fprintf(os.Stderr, "%s: %s (%d roots)\n", logPrefix, loadLabel(loaded, time.Since(loadStart)), len(cfg.Roots))
+
+	d := &daemonState{cfg: cfg, shards: shards}
+
+	specs := make([]reconcile.RootSpec, len(cfg.Roots))
+	for i, r := range cfg.Roots {
+		specs[i] = reconcile.RootSpec{Path: r.Path, Opts: crawlOptions(cfg, r)}
+	}
+	sched := reconcile.NewScheduler(specs, reconcile.DefaultInterval, func(res reconcile.Result) {
+		if res.Err != nil {
+			fmt.Fprintf(os.Stderr, "%s: reconcile %s: %v\n", logPrefix, res.Root, res.Err)
+			return
+		}
+		if err := snapshot.Save(res.Shard); err != nil {
+			fmt.Fprintf(os.Stderr, "%s: warning: could not save snapshot for %s: %v\n", logPrefix, res.Root, err)
+		}
+		d.replace(res.Root, res.Shard)
+	})
+	d.wakeImpl = sched.WakeFromSleep
+	go sched.Run(ctx)
+
+	if err := startWatcher(ctx, d, cfg); err != nil {
+		// A watcher that fails to start is not fatal: the recrawl
+		// Scheduler above still bounds drift to a day, per §8 item 3,
+		// and every query path still works against whatever was loaded
+		// at startup.
+		fmt.Fprintf(os.Stderr, "%s: warning: watcher not started: %v\n", logPrefix, err)
+	}
+
+	return d, nil
+}
+
 // runDaemon implements `scry daemon [--serve[=host:port]]`: the resident
 // process described in §3 and §7 — load every configured root from its
 // snapshot (crawling only what's missing or stale), hold the shards in
@@ -169,38 +212,12 @@ func runDaemon(args []string) error {
 		return fmt.Errorf("no roots configured; run `scry root add <path>` first")
 	}
 
-	loadStart := time.Now()
-	shards, _, loaded := loadOrCrawlAll(cfg)
-	fmt.Fprintf(os.Stderr, "scry: daemon: %s (%d roots)\n", loadLabel(loaded, time.Since(loadStart)), len(cfg.Roots))
-
-	d := &daemonState{cfg: cfg, shards: shards}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	specs := make([]reconcile.RootSpec, len(cfg.Roots))
-	for i, r := range cfg.Roots {
-		specs[i] = reconcile.RootSpec{Path: r.Path, Opts: crawlOptions(cfg, r)}
-	}
-	sched := reconcile.NewScheduler(specs, reconcile.DefaultInterval, func(res reconcile.Result) {
-		if res.Err != nil {
-			fmt.Fprintf(os.Stderr, "scry: daemon: reconcile %s: %v\n", res.Root, res.Err)
-			return
-		}
-		if err := snapshot.Save(res.Shard); err != nil {
-			fmt.Fprintf(os.Stderr, "scry: daemon: warning: could not save snapshot for %s: %v\n", res.Root, err)
-		}
-		d.replace(res.Root, res.Shard)
-	})
-	d.wakeImpl = sched.WakeFromSleep
-	go sched.Run(ctx)
-
-	if err := startWatcher(ctx, d, cfg); err != nil {
-		// A watcher that fails to start is not fatal to the daemon: the
-		// recrawl Scheduler above still bounds drift to a day, per §8
-		// item 3, and every query path still works against whatever was
-		// loaded at startup.
-		fmt.Fprintf(os.Stderr, "scry: daemon: warning: watcher not started: %v\n", err)
+	d, err := startCore(ctx, cfg, "scry: daemon")
+	if err != nil {
+		return err
 	}
 
 	// A plain Ctrl-C should shut the daemon down the same clean way

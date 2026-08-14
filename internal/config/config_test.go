@@ -111,6 +111,70 @@ hidden = true
 	}
 }
 
+func TestDefaultHotkeyCombo(t *testing.T) {
+	if got := Default().Hotkey.Combo; got != "alt+space" {
+		t.Errorf("Default().Hotkey.Combo = %q, want %q", got, "alt+space")
+	}
+}
+
+func TestLoadHotkeySection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	content := `
+[hotkey]
+combo = "cmd+shift+k"
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if c.Hotkey.Combo != "cmd+shift+k" {
+		t.Errorf("Load() Hotkey.Combo = %q, want %q", c.Hotkey.Combo, "cmd+shift+k")
+	}
+}
+
+func TestLoadHotkeySectionEmptyComboFallsBackToDefault(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	// A [hotkey] block present but with no combo key set (BurntSushi/toml
+	// can't distinguish this from combo = ""): should normalize to the
+	// default, the same way an empty [exclude] block does, not leave the
+	// hotkey unparseable.
+	content := `
+[hotkey]
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if c.Hotkey.Combo != defaultHotkeyCombo {
+		t.Errorf("Load() Hotkey.Combo = %q, want default %q", c.Hotkey.Combo, defaultHotkeyCombo)
+	}
+}
+
+func TestSaveNeverWritesEmptyCombo(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	c := Default()
+	c.Hotkey.Combo = ""
+	if err := Save(path, c); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got.Hotkey.Combo != defaultHotkeyCombo {
+		t.Errorf("round-tripped Hotkey.Combo = %q, want default %q", got.Hotkey.Combo, defaultHotkeyCombo)
+	}
+}
+
 func TestSaveLoadRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sub", "config.toml")

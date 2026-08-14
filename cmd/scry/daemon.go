@@ -11,14 +11,20 @@ import (
 	"time"
 
 	"scry/internal/config"
+	"scry/internal/fsevents"
 	"scry/internal/index"
 	"scry/internal/ipc"
 	"scry/internal/qsyntax"
 	"scry/internal/query"
 	"scry/internal/reconcile"
 	"scry/internal/snapshot"
+	"scry/internal/watcher"
 	"scry/internal/web"
 )
+
+// fsEventsLatency is the coalescing window passed to FSEventStreamCreate,
+// per "everything-macos-design.md" §6's example.
+const fsEventsLatency = 300 * time.Millisecond
 
 // daemonState holds a resident daemon's live shards, guarded by a lock
 // because the recrawl Scheduler (see internal/reconcile) replaces a root's
@@ -69,6 +75,22 @@ func (d *daemonState) replace(root string, shard *index.Shard) {
 			return
 		}
 	}
+}
+
+// shardFor returns the *index.Shard currently resident for root, or nil if
+// root is not (or no longer) configured. This is the watcher.Config.GetShard
+// implementation: the watcher's own goroutine reads through here, and
+// d.replace (== watcher.Config.SetShard) is how it swaps one in, exactly
+// the same shape the recrawl Scheduler already uses.
+func (d *daemonState) shardFor(root string) *index.Shard {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	for i, r := range d.cfg.Roots {
+		if r.Path == root {
+			return d.shards[i]
+		}
+	}
+	return nil
 }
 
 // status builds the current status rows, reusing the same shape `scry
@@ -173,6 +195,14 @@ func runDaemon(args []string) error {
 	d.wakeImpl = sched.WakeFromSleep
 	go sched.Run(ctx)
 
+	if err := startWatcher(ctx, d, cfg); err != nil {
+		// A watcher that fails to start is not fatal to the daemon: the
+		// recrawl Scheduler above still bounds drift to a day, per §8
+		// item 3, and every query path still works against whatever was
+		// loaded at startup.
+		fmt.Fprintf(os.Stderr, "scry: daemon: warning: watcher not started: %v\n", err)
+	}
+
 	// A plain Ctrl-C should shut the daemon down the same clean way
 	// `scry stop` does, not leave a half-closed socket behind.
 	sigCh := make(chan os.Signal, 1)
@@ -202,6 +232,105 @@ func runDaemon(args []string) error {
 		return fmt.Errorf("scry: %w — is a daemon already running?", err)
 	}
 	return err
+}
+
+// startWatcher builds and starts the FSEvents watcher described in §6: one
+// combined stream over every configured root's path, resuming from the
+// oldest shard's lastEID so no shard misses events, at the cost of
+// replaying some events shards further ahead already applied — safe only
+// because internal/watcher's apply logic is idempotent by construction.
+// The watcher runs until ctx is cancelled, alongside the recrawl
+// Scheduler already started by the caller.
+func startWatcher(ctx context.Context, d *daemonState, cfg config.Config) error {
+	shards := d.snapshotShards()
+
+	roots := make([]watcher.Root, len(cfg.Roots))
+	paths := make([]string, len(cfg.Roots))
+	for i, r := range cfg.Roots {
+		roots[i] = watcher.Root{
+			Path:          r.Path,
+			Opts:          crawlOptions(cfg, r),
+			OfflinePolicy: r.OfflinePolicy,
+		}
+		paths[i] = r.Path
+	}
+
+	sinceID := minLastEID(shards)
+
+	source, err := fsevents.NewStream(fsevents.Config{
+		Paths:        paths,
+		Latency:      fsEventsLatency,
+		SinceEventID: sinceID,
+		FileEvents:   true,
+		WatchRoot:    true,
+		NoDefer:      true,
+	})
+	if err != nil {
+		return err
+	}
+
+	w := watcher.New(watcher.Config{
+		Roots:    roots,
+		Source:   source,
+		GetShard: d.shardFor,
+		SetShard: d.replace,
+		Persist: func(s *index.Shard) {
+			if err := snapshot.Save(s); err != nil {
+				fmt.Fprintf(os.Stderr, "scry: daemon: warning: could not save snapshot for %s: %v\n", s.Root(), err)
+			}
+		},
+		Logf: func(format string, args ...interface{}) {
+			fmt.Fprintf(os.Stderr, "scry: "+format+"\n", args...)
+		},
+	})
+
+	label := "since now"
+	if sinceID != 0 {
+		label = fmt.Sprintf("at event id %d", sinceID)
+	}
+	fmt.Fprintf(os.Stderr, "scry: daemon: watcher: starting %s (%s)\n", eventsLabel(fsevents.Supported), label)
+
+	go w.Run(ctx)
+	return nil
+}
+
+// eventsLabel names what kind of event source the watcher is actually
+// running against, so a Windows or Linux daemon log never implies live
+// FSEvents coverage it does not have.
+func eventsLabel(supported bool) string {
+	if supported {
+		return "FSEvents stream"
+	}
+	return "no-op event source (FSEvents unsupported on this platform)"
+}
+
+// minLastEID returns the smallest lastEID across shards, per §6: "resuming
+// the combined stream from the oldest shard's ID replays events other
+// shards have already applied" — safe because updates are idempotent. A
+// shard that was only ever crawled, never watched, reports 0; if that is
+// the minimum, the darwin fsevents implementation resolves it to the
+// current host event id (LatestEventID) rather than replaying full
+// history, so a single never-watched root does not force a large replay
+// for the others. Documented tradeoff: mixing one fresh root with
+// long-watched ones still means the fresh root's presence pins the whole
+// stream to "now", so any file that lands in an older root between its
+// last watch and this startup is only caught by the next recrawl pass —
+// not by history replay. Splitting fresh roots onto their own stream
+// would fix that; out of scope here (§6 mandates one combined stream).
+func minLastEID(shards []*index.Shard) uint64 {
+	var min uint64
+	first := true
+	for _, s := range shards {
+		if s == nil {
+			continue
+		}
+		eid := s.LastEID()
+		if first || eid < min {
+			min = eid
+			first = false
+		}
+	}
+	return min
 }
 
 // parseServeFlag scans daemon's arguments for --serve or --serve=host:port.

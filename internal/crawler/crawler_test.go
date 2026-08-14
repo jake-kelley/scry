@@ -1,0 +1,217 @@
+package crawler
+
+import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"testing"
+
+	"scry/internal/index"
+)
+
+func mustMkdir(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", path, err)
+	}
+}
+
+func mustWrite(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// findByName walks a shard's tree via Children looking for an entry named
+// name (case-insensitive, per the shard's own name folding).
+func findByName(s *index.Shard, name string) (uint32, bool) {
+	var found uint32
+	var ok bool
+	var visit func(id uint32)
+	visit = func(id uint32) {
+		if ok {
+			return
+		}
+		for _, c := range s.Children(id) {
+			e, exists := s.Get(c)
+			if !exists {
+				continue
+			}
+			if e.Name == name {
+				found, ok = c, true
+				return
+			}
+			visit(c)
+			if ok {
+				return
+			}
+		}
+	}
+	visit(s.RootID())
+	return found, ok
+}
+
+func TestCrawlBasicTree(t *testing.T) {
+	root := t.TempDir()
+	mustMkdir(t, filepath.Join(root, "src"))
+	mustWrite(t, filepath.Join(root, "src", "main.go"), "package main")
+	mustWrite(t, filepath.Join(root, "README.md"), "hi")
+
+	shard, stats, err := Crawl(root, Options{})
+	if err != nil {
+		t.Fatalf("Crawl: %v", err)
+	}
+
+	if _, ok := findByName(shard, "main.go"); !ok {
+		t.Error("main.go not found in shard")
+	}
+	if _, ok := findByName(shard, "README.md"); !ok {
+		t.Error("README.md not found in shard")
+	}
+	if _, ok := findByName(shard, "src"); !ok {
+		t.Error("src dir not found in shard")
+	}
+
+	if stats.Entries != 3 {
+		t.Errorf("Entries = %d, want 3", stats.Entries)
+	}
+	if stats.Dirs != 1 {
+		t.Errorf("Dirs = %d, want 1", stats.Dirs)
+	}
+	if stats.Duration < 0 {
+		t.Error("Duration should not be negative")
+	}
+}
+
+func TestCrawlExcludesDirectory(t *testing.T) {
+	root := t.TempDir()
+	nm := filepath.Join(root, "node_modules")
+	mustMkdir(t, nm)
+	// A deep, expensive-to-walk subtree that must never be descended into.
+	mustMkdir(t, filepath.Join(nm, "pkg", "sub"))
+	mustWrite(t, filepath.Join(nm, "pkg", "sub", "index.js"), "//")
+	mustWrite(t, filepath.Join(root, "app.go"), "package main")
+
+	shard, stats, err := Crawl(root, Options{Excludes: []string{"node_modules"}})
+	if err != nil {
+		t.Fatalf("Crawl: %v", err)
+	}
+
+	if _, ok := findByName(shard, "node_modules"); ok {
+		t.Error("node_modules should have been excluded")
+	}
+	if _, ok := findByName(shard, "index.js"); ok {
+		t.Error("index.js inside excluded dir should never have been visited")
+	}
+	if _, ok := findByName(shard, "app.go"); !ok {
+		t.Error("app.go should be indexed")
+	}
+	if stats.Skipped == 0 {
+		t.Error("Skipped should count the excluded directory")
+	}
+	if stats.Entries != 1 {
+		t.Errorf("Entries = %d, want 1 (only app.go; excluded subtree must not be walked)", stats.Entries)
+	}
+}
+
+func TestCrawlGlobExclude(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "a.tmp"), "x")
+	mustWrite(t, filepath.Join(root, "a.go"), "x")
+
+	shard, stats, err := Crawl(root, Options{Globs: []string{"*.tmp"}})
+	if err != nil {
+		t.Fatalf("Crawl: %v", err)
+	}
+	if _, ok := findByName(shard, "a.tmp"); ok {
+		t.Error("a.tmp should have been excluded by glob")
+	}
+	if _, ok := findByName(shard, "a.go"); !ok {
+		t.Error("a.go should be indexed")
+	}
+	if stats.Entries != 1 {
+		t.Errorf("Entries = %d, want 1", stats.Entries)
+	}
+}
+
+func TestCrawlHiddenDefaultExcluded(t *testing.T) {
+	root := t.TempDir()
+	mustMkdir(t, filepath.Join(root, ".hidden-dir"))
+	mustWrite(t, filepath.Join(root, ".hidden-dir", "secret.txt"), "x")
+	mustWrite(t, filepath.Join(root, ".dotfile"), "x")
+	mustWrite(t, filepath.Join(root, "visible.txt"), "x")
+
+	shard, stats, err := Crawl(root, Options{Hidden: false})
+	if err != nil {
+		t.Fatalf("Crawl: %v", err)
+	}
+	if _, ok := findByName(shard, ".dotfile"); ok {
+		t.Error(".dotfile should be excluded when Hidden is false")
+	}
+	if _, ok := findByName(shard, ".hidden-dir"); ok {
+		t.Error(".hidden-dir should be excluded when Hidden is false")
+	}
+	if _, ok := findByName(shard, "secret.txt"); ok {
+		t.Error("contents of an excluded hidden dir should never be visited")
+	}
+	if _, ok := findByName(shard, "visible.txt"); !ok {
+		t.Error("visible.txt should be indexed")
+	}
+	if stats.Entries != 1 {
+		t.Errorf("Entries = %d, want 1", stats.Entries)
+	}
+}
+
+func TestCrawlHiddenIncluded(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, ".dotfile"), "x")
+
+	shard, _, err := Crawl(root, Options{Hidden: true})
+	if err != nil {
+		t.Fatalf("Crawl: %v", err)
+	}
+	if _, ok := findByName(shard, ".dotfile"); !ok {
+		t.Error(".dotfile should be indexed when Hidden is true")
+	}
+}
+
+func TestCrawlUnreadableDirCountedNotFatal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits are not enforced the same way on Windows")
+	}
+
+	root := t.TempDir()
+	blocked := filepath.Join(root, "blocked")
+	mustMkdir(t, blocked)
+	mustWrite(t, filepath.Join(blocked, "secret"), "x")
+	mustWrite(t, filepath.Join(root, "ok.txt"), "x")
+
+	if err := os.Chmod(blocked, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	defer os.Chmod(blocked, 0o755)
+
+	shard, stats, err := Crawl(root, Options{})
+	if err != nil {
+		t.Fatalf("Crawl must not fail on an unreadable directory: %v", err)
+	}
+	if stats.Errors == 0 {
+		t.Error("Errors should count the unreadable directory")
+	}
+	if _, ok := findByName(shard, "ok.txt"); !ok {
+		t.Error("ok.txt should still be indexed despite the sibling error")
+	}
+}
+
+func TestCrawlRootPath(t *testing.T) {
+	root := t.TempDir()
+	shard, _, err := Crawl(root, Options{})
+	if err != nil {
+		t.Fatalf("Crawl: %v", err)
+	}
+	abs, _ := filepath.Abs(root)
+	if shard.Root() != abs {
+		t.Errorf("Root() = %q, want %q", shard.Root(), abs)
+	}
+}

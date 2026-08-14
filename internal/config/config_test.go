@@ -1,0 +1,355 @@
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"reflect"
+	"runtime"
+	"strings"
+	"testing"
+)
+
+func TestDefault(t *testing.T) {
+	d := Default()
+	if len(d.Roots) != 0 {
+		t.Fatalf("Default() Roots = %v, want empty", d.Roots)
+	}
+	wantNames := []string{"node_modules", ".git", ".venv", "__pycache__", "build", "dist"}
+	if !reflect.DeepEqual(d.Exclude.Names, wantNames) {
+		t.Errorf("Default() Exclude.Names = %v, want %v", d.Exclude.Names, wantNames)
+	}
+	wantGlobs := []string{"*.tmp", "*.o", "*.pyc"}
+	if !reflect.DeepEqual(d.Exclude.Globs, wantGlobs) {
+		t.Errorf("Default() Exclude.Globs = %v, want %v", d.Exclude.Globs, wantGlobs)
+	}
+	if d.Index.FollowSymlinks {
+		t.Error("Default() Index.FollowSymlinks = true, want false")
+	}
+	if d.Index.Hidden {
+		t.Error("Default() Index.Hidden = true, want false")
+	}
+}
+
+func TestLoadMissingFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "does-not-exist", "config.toml")
+
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil for missing file", err)
+	}
+	if !reflect.DeepEqual(c, Default()) {
+		t.Errorf("Load() = %+v, want Default() %+v", c, Default())
+	}
+}
+
+func TestLoadMalformed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte("this is not [ valid toml"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load() error = nil, want error for malformed TOML")
+	}
+}
+
+func TestLoadPartialFillsDefaults(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	// Only roots specified; exclude/index sections absent entirely.
+	content := `
+[[root]]
+path = "~/Documents"
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(c.Roots) != 1 || c.Roots[0].Path != "~/Documents" {
+		t.Errorf("Load() Roots = %v, want one root ~/Documents", c.Roots)
+	}
+	d := Default()
+	if !reflect.DeepEqual(c.Exclude, d.Exclude) {
+		t.Errorf("Load() Exclude = %+v, want default %+v", c.Exclude, d.Exclude)
+	}
+	if !reflect.DeepEqual(c.Index, d.Index) {
+		t.Errorf("Load() Index = %+v, want default %+v", c.Index, d.Index)
+	}
+}
+
+func TestLoadEmptyExcludeBlockDoesNotMeanExcludeNothing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	// Explicit but empty exclude block: absent from the file entirely
+	// (BurntSushi/toml has no way to distinguish "present but empty" from
+	// "absent" for a table with no keys set), so this should still fill
+	// from defaults.
+	content := `
+[index]
+hidden = true
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(c.Exclude.Names) == 0 {
+		t.Error("Load() Exclude.Names is empty, want defaults to be filled in")
+	}
+	if !c.Index.Hidden {
+		t.Error("Load() Index.Hidden = false, want true (explicitly set)")
+	}
+}
+
+func TestSaveLoadRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sub", "config.toml")
+
+	want := Default()
+	want.Roots = []Root{
+		{Path: "/home/user/Documents"},
+		{Path: "/home/user/code", Exclude: []string{"target", "vendor"}, OfflinePolicy: "keep"},
+	}
+
+	if err := Save(path, want); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("round trip mismatch:\ngot  = %+v\nwant = %+v", got, want)
+	}
+}
+
+func TestSaveAtomicNoTempFileLeftBehind(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	if err := Save(path, Default()); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "config.toml" {
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		t.Errorf("dir contents = %v, want only [config.toml]", names)
+	}
+}
+
+func TestSaveMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file mode bits are not meaningful on windows")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := Save(path, Default()); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("file mode = %o, want 0600", perm)
+	}
+}
+
+func TestSaveCreatesParentDirs(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "a", "b", "c", "config.toml")
+	if err := Save(path, Default()); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected file to exist: %v", err)
+	}
+}
+
+func TestAddRoot(t *testing.T) {
+	var c Config
+	if err := c.AddRoot("/tmp/a"); err != nil {
+		t.Fatalf("AddRoot() error = %v", err)
+	}
+	if len(c.Roots) != 1 || c.Roots[0].Path != filepath.Clean("/tmp/a") {
+		t.Errorf("Roots = %v", c.Roots)
+	}
+
+	if err := c.AddRoot("/tmp/a"); err == nil {
+		t.Error("AddRoot() duplicate error = nil, want error")
+	}
+	if len(c.Roots) != 1 {
+		t.Errorf("Roots = %v, want unchanged after duplicate add", c.Roots)
+	}
+}
+
+func TestAddRootCaseInsensitive(t *testing.T) {
+	if runtime.GOOS != "windows" && runtime.GOOS != "darwin" {
+		t.Skip("case-insensitive matching only applies on windows/darwin")
+	}
+	var c Config
+	if err := c.AddRoot("/tmp/A"); err != nil {
+		t.Fatalf("AddRoot() error = %v", err)
+	}
+	if err := c.AddRoot("/tmp/a"); err == nil {
+		t.Error("AddRoot() case-insensitive duplicate error = nil, want error")
+	}
+}
+
+func TestRemoveRoot(t *testing.T) {
+	var c Config
+	if err := c.AddRoot("/tmp/a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.AddRoot("/tmp/b"); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := c.RemoveRoot("/tmp/a")
+	if err != nil {
+		t.Fatalf("RemoveRoot() error = %v", err)
+	}
+	if !removed {
+		t.Error("RemoveRoot() removed = false, want true")
+	}
+	if len(c.Roots) != 1 || c.Roots[0].Path != filepath.Clean("/tmp/b") {
+		t.Errorf("Roots = %v, want only /tmp/b", c.Roots)
+	}
+
+	removed, err = c.RemoveRoot("/tmp/does-not-exist")
+	if err != nil {
+		t.Fatalf("RemoveRoot() error = %v", err)
+	}
+	if removed {
+		t.Error("RemoveRoot() removed = true, want false for absent root")
+	}
+}
+
+func TestExpandTilde(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home dir available")
+	}
+
+	tests := []struct {
+		name    string
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{name: "bare tilde", in: "~", want: home},
+		{name: "tilde slash", in: "~/Documents", want: filepath.Join(home, "Documents")},
+		{name: "no tilde", in: "/etc/passwd", want: "/etc/passwd"},
+		{name: "relative no tilde", in: "code", want: "code"},
+		{name: "tilde user unsupported", in: "~jake/Documents", wantErr: true},
+		{name: "tilde user bare unsupported", in: "~jake", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ExpandTilde(tt.in)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("ExpandTilde(%q) error = nil, want error", tt.in)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ExpandTilde(%q) error = %v", tt.in, err)
+			}
+			if got != tt.want {
+				t.Errorf("ExpandTilde(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateEmptyRootPath(t *testing.T) {
+	c := Config{Roots: []Root{{Path: ""}, {Path: "   "}}}
+	errs := c.Validate()
+	if len(errs) < 2 {
+		t.Fatalf("Validate() = %v, want at least 2 errors for empty paths", errs)
+	}
+}
+
+func TestValidateDuplicateRoots(t *testing.T) {
+	c := Config{Roots: []Root{
+		{Path: "/tmp/a"},
+		{Path: "/tmp/a/"},
+	}}
+	errs := c.Validate()
+	found := false
+	for _, e := range errs {
+		if strings.Contains(e.Error(), "duplicate") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Validate() = %v, want a duplicate-root error", errs)
+	}
+}
+
+func TestValidateOfflinePolicy(t *testing.T) {
+	tests := []struct {
+		policy  string
+		wantErr bool
+	}{
+		{"keep", false},
+		{"drop", false},
+		{"", false},
+		{"bogus", true},
+	}
+	for _, tt := range tests {
+		c := Config{Roots: []Root{{Path: "/tmp/x", OfflinePolicy: tt.policy}}}
+		errs := c.Validate()
+		hasPolicyErr := false
+		for _, e := range errs {
+			if strings.Contains(e.Error(), "offline_policy") {
+				hasPolicyErr = true
+			}
+		}
+		if hasPolicyErr != tt.wantErr {
+			t.Errorf("Validate() policy %q: got error=%v, want %v (errs=%v)", tt.policy, hasPolicyErr, tt.wantErr, errs)
+		}
+	}
+}
+
+func TestValidateUnparseableGlobs(t *testing.T) {
+	c := Config{
+		Roots: []Root{
+			{Path: "/tmp/x", Exclude: []string{"[unclosed"}},
+		},
+		Exclude: Exclude{Globs: []string{"[also-unclosed"}},
+	}
+	errs := c.Validate()
+	if len(errs) < 2 {
+		t.Fatalf("Validate() = %v, want at least 2 errors for bad globs", errs)
+	}
+}
+
+func TestValidateGoodConfigHasNoErrors(t *testing.T) {
+	c := Default()
+	c.Roots = []Root{
+		{Path: "/tmp/a", OfflinePolicy: "keep"},
+		{Path: "/tmp/b", OfflinePolicy: "drop", Exclude: []string{"*.log"}},
+	}
+	if errs := c.Validate(); len(errs) != 0 {
+		t.Errorf("Validate() = %v, want no errors", errs)
+	}
+}

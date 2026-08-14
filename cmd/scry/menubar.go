@@ -19,10 +19,13 @@ import (
 // blocking it, so the IPC socket and the --serve web UI both start as
 // goroutines here rather than being called inline.
 //
-// packaging/NOTES-FOR-UI.md flags that the LaunchAgent plist currently
-// points ProgramArguments at `scry daemon`, not this command — packaging
-// owns that file and needs a follow-up patch to point at `scry menubar`
-// once this lands; see this task's final report.
+// Unlike every other subcommand, this one must not fail when no roots are
+// configured. It is what packaging/com.jakekelley.scry.plist launches, and
+// that agent sets KeepAlive: returning an error here on a fresh install put
+// launchd into an endless respawn loop, with no status item ever drawn and
+// therefore no Preferences… item to reach — the user could not configure
+// the roots whose absence was causing the crash. A menu bar app has to come
+// up empty and say so.
 func runMenubar(args []string) error {
 	if !menubar.Supported {
 		return errors.New("scry: menubar is only supported on macOS")
@@ -36,7 +39,8 @@ func runMenubar(args []string) error {
 		return err
 	}
 	if len(cfg.Roots) == 0 {
-		return fmt.Errorf("no roots configured; run `scry root add <path>` first")
+		fmt.Fprintln(os.Stderr, "scry: menubar: no roots configured; "+
+			"starting anyway — use Preferences… in the menu to add one")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

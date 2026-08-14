@@ -49,6 +49,26 @@ func TestTotalEntries(t *testing.T) {
 	}
 }
 
+// TestFormatStatusDistinguishesNoRootsFromNoFiles pins the fresh-install
+// state. A brand-new install has no roots, and rendering that as "0 files
+// indexed" makes a correctly-working app look broken while saying nothing
+// about the one menu item that fixes it. A root that is configured but
+// genuinely empty is a different thing and must still read as a count.
+func TestFormatStatusDistinguishesNoRootsFromNoFiles(t *testing.T) {
+	if got := FormatStatus(nil); got != "No roots configured — see Preferences…" {
+		t.Errorf("FormatStatus(nil) = %q, want the no-roots prompt", got)
+	}
+	if got := FormatStatus([]ipc.RootStatus{}); got != "No roots configured — see Preferences…" {
+		t.Errorf("FormatStatus(empty) = %q, want the no-roots prompt", got)
+	}
+	if got := FormatStatus([]ipc.RootStatus{{Path: "/a", Entries: 0}}); got != "0 files indexed" {
+		t.Errorf("FormatStatus(one empty root) = %q, want a count: the root exists, it is just empty", got)
+	}
+	if got := FormatStatus([]ipc.RootStatus{{Path: "/a", Entries: 1}}); got != "1 file indexed" {
+		t.Errorf("FormatStatus(one file) = %q, want the singular", got)
+	}
+}
+
 func TestSearchURL(t *testing.T) {
 	if got, want := SearchURL("127.0.0.1:8973"), "http://127.0.0.1:8973/"; got != want {
 		t.Errorf("SearchURL() = %q, want %q", got, want)

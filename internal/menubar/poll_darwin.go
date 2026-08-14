@@ -3,7 +3,9 @@
 package menubar
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"fyne.io/systray"
@@ -23,7 +25,7 @@ func pollCount(opts Options, mCount *systray.MenuItem) {
 	interval := opts.pollInterval()
 	for {
 		if rows, err := status(opts.Addr); err == nil {
-			mCount.SetTitle(FormatCount(TotalEntries(rows)))
+			mCount.SetTitle(FormatStatus(rows))
 		}
 		time.Sleep(interval)
 	}
@@ -47,7 +49,23 @@ func status(addr ipc.Addr) ([]ipc.RootStatus, error) {
 	return resp.Stats.Roots, nil
 }
 
-// configPath returns scry's config file path, for Preferences… to open.
+// configPath returns scry's config file path for Preferences… to open,
+// materialising a default file first if none exists yet.
+//
+// Writing the file is the point, not a side effect. On a fresh install
+// there is no config at all, and `open` on a path that does not exist
+// fails — which would break Preferences… exactly when it is the only way
+// out: no roots means nothing indexed, and the menu item that lets the
+// user fix that has to work on first launch or the app is a dead end.
 func configPath() (string, error) {
-	return config.ConfigPath()
+	path, err := config.ConfigPath()
+	if err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		if err := config.Save(path, config.Default()); err != nil {
+			return "", fmt.Errorf("creating a default config to open: %w", err)
+		}
+	}
+	return path, nil
 }

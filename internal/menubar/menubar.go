@@ -81,6 +81,18 @@ func openPathCmd(path string) *exec.Cmd {
 	return exec.Command("open", path)
 }
 
+// FormatStatus renders the status line in the menu for a "status" reply.
+// A fresh install has no roots at all, and "0 files indexed" reads there
+// like a broken indexer rather than an unconfigured one — it tells the
+// user nothing about what to do next. With no roots, point at the item
+// that fixes it instead.
+func FormatStatus(rows []ipc.RootStatus) string {
+	if len(rows) == 0 {
+		return "No roots configured — see Preferences…"
+	}
+	return FormatCount(TotalEntries(rows))
+}
+
 // FormatCount renders the live indexed-file count the way the status
 // menu item shows it: "0 files indexed", "1 file indexed",
 // "247,391 files indexed" — comma-grouped so a six-digit count is still

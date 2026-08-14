@@ -1,16 +1,29 @@
 //go:build darwin
 
-// This file is the project's one cgo boundary (§8 item 5 of the design
-// doc). The C surface is kept deliberately tiny: create a stream, schedule
-// and start it on a run loop owned by a dedicated goroutine, and stop it.
+// This file is one of the project's three cgo boundaries (§8 item 5 of the
+// design doc). The C surface is kept deliberately tiny: create a stream,
+// attach it to a serial dispatch queue, start it, and tear it down.
 // Everything else — routing events to shards, exclude rules, rescans,
 // offline handling — is plain Go in internal/watcher and never touches cgo.
+//
+// The stream is driven by a dispatch queue rather than a CFRunLoop.
+// FSEventStreamScheduleWithRunLoop has been deprecated since macOS 13 in
+// favour of FSEventStreamSetDispatchQueue, and taking the replacement
+// deletes a surprising amount of machinery: no dedicated thread, no
+// runtime.LockOSThread, no waiting for CFRunLoopRun to be entered before
+// NewStream may return, and no retry loop around CFRunLoopStop to close the
+// race where a Stop arriving before the run loop started would land as a
+// documented no-op and hang forever. A serial queue gives the same
+// guarantee that made a run loop attractive — callbacks never overlap — and
+// gives it without owning a thread.
 package fsevents
 
 /*
 #cgo LDFLAGS: -framework CoreServices
+#cgo CFLAGS: -fblocks
 
 #include <CoreServices/CoreServices.h>
+#include <dispatch/dispatch.h>
 #include <stdlib.h>
 
 // goFSEventsCallback is implemented in Go (see the //export below) and
@@ -62,25 +75,41 @@ static FSEventStreamRef fsevents_create(unsigned long long handle, char **paths,
     return stream;
 }
 
-static void fsevents_schedule_and_start(FSEventStreamRef stream, CFRunLoopRef rl) {
-    FSEventStreamScheduleWithRunLoop(stream, rl, kCFRunLoopDefaultMode);
+// fsevents_queue_create makes the serial queue the stream's callbacks run
+// on. Serial is the load-bearing part: it is what guarantees callbacks
+// never overlap, which the Go side relies on when it tears the stream down.
+static dispatch_queue_t fsevents_queue_create(void) {
+    return dispatch_queue_create("dev.scry.fsevents", DISPATCH_QUEUE_SERIAL);
+}
+
+static void fsevents_start(FSEventStreamRef stream, dispatch_queue_t q) {
+    FSEventStreamSetDispatchQueue(stream, q);
     FSEventStreamStart(stream);
 }
 
-// fsevents_stop_and_invalidate must run on the same thread the stream was
-// scheduled on, after CFRunLoopRun has returned there — see (*darwinStream).Stop.
-static void fsevents_stop_and_invalidate(FSEventStreamRef stream) {
+// fsevents_teardown stops the stream and returns only once no callback can
+// still be running. Unlike the run-loop API this is safe to call from any
+// thread.
+//
+// The dispatch_sync of an empty block is the whole trick and is not
+// decoration: FSEventStreamInvalidate stops future callbacks from being
+// enqueued but says nothing about one already executing. Because the queue
+// is serial, a block submitted after invalidate cannot begin until any
+// in-flight callback has finished, so waiting for that block to run is
+// exactly "no callback is in flight any more" — which is what lets the Go
+// side close the events channel without racing a send on it.
+static void fsevents_teardown(FSEventStreamRef stream, dispatch_queue_t q) {
     FSEventStreamStop(stream);
     FSEventStreamInvalidate(stream);
     FSEventStreamRelease(stream);
+    dispatch_sync(q, ^{});
+    dispatch_release(q);
 }
 */
 import "C"
 
 import (
-	"runtime"
 	"sync"
-	"time"
 	"unsafe"
 )
 
@@ -122,7 +151,7 @@ func goFSEventsCallback(handle C.ulonglong, paths **C.char, eventIDs *C.ulonglon
 		// itself already buffers and coalesces on the kernel side, so a
 		// slow consumer delays the next callback invocation rather than
 		// losing anything. Doing index work here instead would tie up
-		// the CFRunLoop thread and risk the kernel deciding we're too
+		// the dispatch queue and risk the kernel deciding we're too
 		// slow (UserDropped), which is strictly worse.
 		ch <- ev
 	}
@@ -133,19 +162,18 @@ type darwinStream struct {
 	handle uint64
 	events chan Event
 
-	rl     C.CFRunLoopRef
-	ready  chan struct{}
 	stream C.FSEventStreamRef
+	queue  C.dispatch_queue_t
 
 	stopOnce sync.Once
 	done     chan struct{}
 }
 
-// NewStream starts a single combined FSEvents stream over cfg.Paths. The
-// callback runs on a dedicated CFRunLoop thread (per §9 item 7: this
-// coexists with an NSApplication run loop on the main thread, it does not
-// compete with it) that this call spins up and that lives until Stop is
-// called.
+// NewStream starts a single combined FSEvents stream over cfg.Paths.
+// Callbacks are delivered on a private serial dispatch queue, which coexists
+// with an NSApplication run loop on the main thread rather than competing
+// with it (§9 item 7) and, unlike the deprecated run-loop scheduling, needs
+// no thread of its own.
 func NewStream(cfg Config) (Stream, error) {
 	sinceWhen := cfg.SinceEventID
 	if sinceWhen == 0 {
@@ -195,68 +223,52 @@ func NewStream(cfg Config) (Stream, error) {
 	s := &darwinStream{
 		handle: handle,
 		events: events,
-		ready:  make(chan struct{}),
 		done:   make(chan struct{}),
 	}
 
-	latencySeconds := cfg.Latency.Seconds()
+	// Registered before the stream can fire, so the first callback always
+	// finds its channel.
+	s.stream = C.fsevents_create(C.ulonglong(handle), cPathsPtr, C.int(len(cPaths)),
+		C.ulonglong(sinceWhen), C.double(cfg.Latency.Seconds()), flags)
+	s.queue = C.fsevents_queue_create()
+	C.fsevents_start(s.stream, s.queue)
 
-	go func() {
-		runtime.LockOSThread()
-		defer runtime.UnlockOSThread()
-
-		s.stream = C.fsevents_create(C.ulonglong(handle), cPathsPtr, C.int(len(cPaths)),
-			C.ulonglong(sinceWhen), C.double(latencySeconds), flags)
-		s.rl = C.CFRunLoopGetCurrent()
-		close(s.ready)
-
-		C.fsevents_schedule_and_start(s.stream, s.rl)
-		C.CFRunLoopRun() // blocks until Stop calls CFRunLoopStop from elsewhere
-
-		C.fsevents_stop_and_invalidate(s.stream)
-
-		registryMu.Lock()
-		delete(registry, handle)
-		registryMu.Unlock()
-		close(s.events)
-
-		close(s.done)
-	}()
-
-	<-s.ready
 	return s, nil
 }
 
 func (s *darwinStream) Events() <-chan Event { return s.events }
 
-// Stop asks the stream's run loop to exit; the goroutine started in
-// NewStream then invalidates and releases the stream from the same thread
-// it was scheduled on, exactly as CoreServices expects, and closes the
-// events channel once no more callbacks can fire. Stop blocks until that
-// teardown has finished.
-//
-// CFRunLoopStop is a documented no-op if the target run loop is not
-// actually inside CFRunLoopRun yet — and NewStream returns as soon as the
-// stream is created, not once CFRunLoopRun has been entered on its
-// goroutine. A Stop called immediately after NewStream can therefore race
-// a CFRunLoopRun that has not started, land as a no-op, and hang forever
-// waiting on s.done. Retrying the stop signal on a short tick until the
-// run loop actually exits closes that window deterministically instead of
-// depending on timing.
+// Stop tears the stream down and closes the events channel. It blocks until
+// no callback can still be running, and is safe to call more than once and
+// from any thread — including immediately after NewStream, which the
+// run-loop implementation this replaced could not survive.
 func (s *darwinStream) Stop() {
 	s.stopOnce.Do(func() {
+		// Tear down with a reader still running. A callback blocked on the
+		// deliberate backpressure send into s.events occupies the serial
+		// queue, and fsevents_teardown's dispatch_sync waits for exactly
+		// that queue — so without draining here, a Stop issued while the
+		// consumer has stopped reading would deadlock against this
+		// package's own backpressure.
+		drained := make(chan struct{})
 		go func() {
-			ticker := time.NewTicker(2 * time.Millisecond)
-			defer ticker.Stop()
-			for {
-				C.CFRunLoopStop(s.rl)
-				select {
-				case <-s.done:
-					return
-				case <-ticker.C:
-				}
+			defer close(drained)
+			for range s.events {
 			}
 		}()
+
+		C.fsevents_teardown(s.stream, s.queue)
+
+		registryMu.Lock()
+		delete(registry, s.handle)
+		registryMu.Unlock()
+
+		// Safe: fsevents_teardown returned, so no callback is in flight and
+		// no further one can be enqueued.
+		close(s.events)
+		<-drained
+
+		close(s.done)
 	})
 	<-s.done
 }

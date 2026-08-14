@@ -84,6 +84,30 @@ func TestCrawlBasicTree(t *testing.T) {
 	}
 }
 
+// TestCrawlStatsAgreeWithShardCount pins the invariant that made `scry
+// index` and `scry status` disagree by one: Stats.Entries excludes the
+// synthetic root entry, Shard.Len includes it, and CountIndexed is the
+// bridge every user-facing count now goes through.
+func TestCrawlStatsAgreeWithShardCount(t *testing.T) {
+	root := t.TempDir()
+	mustMkdir(t, filepath.Join(root, "a"))
+	mustMkdir(t, filepath.Join(root, "a", "b"))
+	mustWrite(t, filepath.Join(root, "a", "b", "deep.txt"), "x")
+	mustWrite(t, filepath.Join(root, "top.txt"), "x")
+
+	shard, stats, err := Crawl(root, Options{})
+	if err != nil {
+		t.Fatalf("Crawl: %v", err)
+	}
+
+	if got := shard.CountIndexed(); got != stats.Entries {
+		t.Errorf("CountIndexed = %d, Stats.Entries = %d; the two numbers a user sees must agree", got, stats.Entries)
+	}
+	if got := shard.Len(); got != stats.Entries+1 {
+		t.Errorf("Len = %d, want Stats.Entries+1 = %d (the extra one is the root entry)", got, stats.Entries+1)
+	}
+}
+
 func TestCrawlExcludesDirectory(t *testing.T) {
 	root := t.TempDir()
 	nm := filepath.Join(root, "node_modules")

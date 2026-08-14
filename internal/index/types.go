@@ -113,11 +113,29 @@ func (s *Shard) RootID() uint32 {
 	return s.rootID
 }
 
-// Len returns the number of live (non-tombstoned) entries.
+// Len returns the number of live (non-tombstoned) entries, including the
+// synthetic root entry. Internal invariants are stated in terms of this
+// count; user-facing output wants CountIndexed instead.
 func (s *Shard) Len() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.len
+}
+
+// CountIndexed returns the number of indexed files and directories,
+// excluding the synthetic root entry New installs at id 0. That entry has
+// an empty name and so can never match a query; it exists only to give
+// every real entry a parent to chain to. Counting it made `scry status`
+// report one more entry per root than `scry index` did for the same tree,
+// because the crawler's Stats.Entries has never included the root.
+func (s *Shard) CountIndexed() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.len == 0 {
+		// The root itself was tombstoned (a deleted or unmounted root).
+		return 0
+	}
+	return s.len - 1
 }
 
 // Online reports whether the shard's root volume is currently mounted.

@@ -438,7 +438,7 @@ func runRootList() error {
 	for i, r := range cfg.Roots {
 		entries := 0
 		if shards[i] != nil {
-			entries = shards[i].Len()
+			entries = shards[i].CountIndexed()
 		}
 		rowsList[i] = row{
 			path:    r.Path,
@@ -506,7 +506,7 @@ func statusRows(cfg config.Config, shards []*index.Shard) []ipc.RootStatus {
 	for i, r := range cfg.Roots {
 		rw := ipc.RootStatus{Path: r.Path}
 		if shards[i] != nil {
-			rw.Entries = shards[i].Len()
+			rw.Entries = shards[i].CountIndexed()
 			rw.Online = shards[i].Online()
 		}
 

@@ -2,6 +2,8 @@
 scry
 scry.exe
 *.exe
+scry-darwin-*
+scry-linux-*
 
 # daemon logs from local runs
 *.log

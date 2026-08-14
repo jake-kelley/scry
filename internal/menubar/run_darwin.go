@@ -8,33 +8,56 @@ import (
 
 	"fyne.io/systray"
 
+	"scry/internal/hotkey"
 	"scry/internal/ipc"
+	"scry/internal/panel"
 )
 
 // Supported is true on darwin; see run_other.go for every other
 // platform.
 const Supported = true
 
-// Run blocks on systray.Run for the rest of the process's life — see
-// this package's doc comment for why nothing else in the process is
-// allowed to also claim thread 1. It returns only after Quit is chosen
-// from the menu (or systray.Quit is otherwise called).
+// Run parses opts.HotkeyCombo, then blocks on systray.Run for the rest
+// of the process's life — see this package's doc comment for why nothing
+// else in the process is allowed to also claim thread 1. It returns only
+// after Quit is chosen from the menu (or systray.Quit is otherwise
+// called), by which point the hotkey has been unregistered and the
+// daemon told to stop.
 func Run(opts Options) error {
-	state := &appState{opts: opts}
+	combo, err := hotkey.Parse(opts.HotkeyCombo)
+	if err != nil {
+		return fmt.Errorf("menubar: %w", err)
+	}
+
+	state := &appState{opts: opts, combo: combo}
 	systray.Run(state.onReady, state.onExit)
 	return nil
 }
 
 // appState holds everything onReady wires up and the goroutine loop
-// below it needs to reach.
+// below it needs to reach: the menu items themselves plus the hotkey and
+// panel handles it must clean up on Quit.
 type appState struct {
-	opts Options
+	opts  Options
+	combo hotkey.Combo
+
+	panel    panel.Panel
+	usePanel bool
+	hk       hotkey.Handle
 }
 
-// trigger is what "Search…" calls: open the search window in the
-// default browser, §7 option 1 — "zero new code, reuses the --serve web
-// UI." A hotkey-driven borderless panel is build step 8, not this one.
+// trigger is what both the hotkey and the "Search…" menu item call:
+// toggle the panel if one was created, or fall back to opening a browser
+// tab (§7 option 1) if the panel could not be created — e.g. on an older
+// macOS without the WebKit entitlement this process happens to be running
+// under. Either fallback direction (hotkey without panel, panel without
+// hotkey) degrades to something that still works rather than doing
+// nothing.
 func (s *appState) trigger() {
+	if s.usePanel {
+		s.panel.Toggle()
+		return
+	}
 	if err := openBrowserCmd(SearchURL(s.opts.WebAddr)).Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "scry: menubar: opening browser: %v\n", err)
 	}
@@ -44,7 +67,11 @@ func (s *appState) onReady() {
 	systray.SetTemplateIcon(templateIconPNG(), templateIconPNG())
 	systray.SetTooltip("scry")
 
-	mSearch := systray.AddMenuItem("Search…", "Open the search window")
+	searchLabel := "Search…"
+	if lbl := s.combo.Label(); lbl != "" {
+		searchLabel = fmt.Sprintf("Search…\t%s", lbl)
+	}
+	mSearch := systray.AddMenuItem(searchLabel, "Open the search window")
 	mCount := systray.AddMenuItem(FormatCount(0), "")
 	mCount.Disable()
 	systray.AddSeparator()
@@ -52,6 +79,19 @@ func (s *appState) onReady() {
 	mPrefs := systray.AddMenuItem("Preferences…", "Edit scry's configuration")
 	systray.AddSeparator()
 	mQuit := systray.AddMenuItem("Quit", "Quit scry")
+
+	if p, err := panel.New(SearchURL(s.opts.WebAddr)); err != nil {
+		fmt.Fprintf(os.Stderr, "scry: menubar: panel unavailable (%v); Search and the hotkey will open a browser tab instead\n", err)
+	} else {
+		s.panel = p
+		s.usePanel = true
+	}
+
+	if hk, err := hotkey.Register(s.combo, s.trigger); err != nil {
+		fmt.Fprintf(os.Stderr, "scry: menubar: hotkey %s not registered: %v\n", s.combo, err)
+	} else {
+		s.hk = hk
+	}
 
 	go pollCount(s.opts, mCount)
 	go s.eventLoop(mSearch, mRebuild, mPrefs, mQuit)
@@ -84,6 +124,9 @@ func (s *appState) eventLoop(mSearch, mRebuild, mPrefs, mQuit *systray.MenuItem)
 			}
 
 		case <-mQuit.ClickedCh:
+			if s.hk != nil {
+				s.hk.Unregister()
+			}
 			if err := stopDaemon(s.opts.Addr); err != nil {
 				// Not fatal to quitting the menu bar app itself — the
 				// process exits either way once systray.Quit runs the

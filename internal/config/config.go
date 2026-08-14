@@ -32,16 +32,35 @@ type IndexOpts struct {
 	Hidden         bool `toml:"hidden"`
 }
 
-// Config is the top-level scry configuration.
-type Config struct {
-	Roots   []Root    `toml:"root"`
-	Exclude Exclude   `toml:"exclude"`
-	Index   IndexOpts `toml:"index"`
+// HotkeyOpts holds the menu bar app's global search hotkey, per
+// "everything-macos-design.md" §7's search window option 3. Combo is a
+// "+"-joined string like "alt+space", parsed by internal/hotkey.Parse —
+// this package does not depend on internal/hotkey to parse or validate
+// it, since a config package growing a platform-UI dependency would be
+// backwards; Validate only checks the shape a TOML string can take
+// (non-empty), leaving real parsing to the package that owns the key
+// vocabulary.
+type HotkeyOpts struct {
+	Combo string `toml:"combo"`
 }
 
+// Config is the top-level scry configuration.
+type Config struct {
+	Roots   []Root     `toml:"root"`
+	Exclude Exclude    `toml:"exclude"`
+	Index   IndexOpts  `toml:"index"`
+	Hotkey  HotkeyOpts `toml:"hotkey"`
+}
+
+// defaultHotkeyCombo mirrors internal/hotkey.DefaultCombo. Duplicated as a
+// literal, not imported, per HotkeyOpts's doc comment — config stays free
+// of any platform-UI dependency. internal/hotkey/hotkey_test.go's
+// TestDefaultComboParses is what keeps the two from drifting apart.
+const defaultHotkeyCombo = "alt+space"
+
 // Default returns the built-in default configuration: no roots configured,
-// a conservative set of global exclusions, and non-intrusive indexing
-// options.
+// a conservative set of global exclusions, non-intrusive indexing
+// options, and Option-Space as the search hotkey.
 func Default() Config {
 	return Config{
 		Roots: nil,
@@ -52,6 +71,9 @@ func Default() Config {
 		Index: IndexOpts{
 			FollowSymlinks: false,
 			Hidden:         false,
+		},
+		Hotkey: HotkeyOpts{
+			Combo: defaultHotkeyCombo,
 		},
 	}
 }
@@ -137,9 +159,10 @@ func Load(path string) (Config, error) {
 	}
 
 	var raw struct {
-		Roots   []Root     `toml:"root"`
-		Exclude *Exclude   `toml:"exclude"`
-		Index   *IndexOpts `toml:"index"`
+		Roots   []Root      `toml:"root"`
+		Exclude *Exclude    `toml:"exclude"`
+		Index   *IndexOpts  `toml:"index"`
+		Hotkey  *HotkeyOpts `toml:"hotkey"`
 	}
 	if _, err := toml.Decode(string(data), &raw); err != nil {
 		return Config{}, fmt.Errorf("config: parse %s: %w", path, err)
@@ -153,8 +176,23 @@ func Load(path string) (Config, error) {
 	if raw.Index != nil {
 		c.Index = *raw.Index
 	}
+	if raw.Hotkey != nil {
+		c.Hotkey = *raw.Hotkey
+	}
 	normalizeOfflinePolicies(c.Roots)
+	normalizeHotkey(&c.Hotkey)
 	return c, nil
+}
+
+// normalizeHotkey fills in defaultHotkeyCombo when combo was left unset —
+// an explicit but empty `[hotkey]` block (or one missing the `combo` key)
+// means "use the default", the same way an old config with no
+// offline_policy field means "keep" rather than "invalid". Mirrors
+// normalizeOfflinePolicies's role for HotkeyOpts.
+func normalizeHotkey(h *HotkeyOpts) {
+	if strings.TrimSpace(h.Combo) == "" {
+		h.Combo = defaultHotkeyCombo
+	}
 }
 
 // normalizeOfflinePolicies fills in the default offline_policy ("keep") on
@@ -181,6 +219,7 @@ func Save(path string, c Config) error {
 	roots := append([]Root(nil), c.Roots...)
 	normalizeOfflinePolicies(roots)
 	c.Roots = roots
+	normalizeHotkey(&c.Hotkey)
 
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {

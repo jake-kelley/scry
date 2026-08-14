@@ -12,8 +12,8 @@ import (
 )
 
 // runMenubar implements `scry menubar`: the LSUIElement entry point
-// described in "everything-macos-design.md" §7. It is the same resident
-// process runDaemon is — same startCore, same socket, same
+// described in "everything-macos-design.md" §7 and §8. It is the same
+// resident process runDaemon is — same startCore, same socket, same
 // snapshot/watcher machinery — except systray.Run (inside
 // internal/menubar.Run) owns the main thread instead of ipc.Serve
 // blocking it, so the IPC socket and the --serve web UI both start as
@@ -59,9 +59,10 @@ func runMenubar(args []string) error {
 	}()
 
 	// Unlike `scry daemon --serve`, the menu bar app always runs the web
-	// UI: Search… needs it, per §7's "one process or two" — everything
-	// routes through the socket or this same-process HTTP server, never
-	// through d directly from internal/menubar.
+	// UI: Search… and the hotkey panel both need it, per §7's "one
+	// process or two" — everything routes through the socket or this
+	// same-process HTTP server, never through d directly from
+	// internal/menubar.
 	go func() {
 		if err := web.Serve(web.DefaultAddr, d.search); err != nil && ctx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "scry: menubar: web: %v\n", err)
@@ -70,13 +71,14 @@ func runMenubar(args []string) error {
 
 	// menubar.Run blocks on systray.Run for the process's life; it
 	// returns once Quit has told the daemon (over the socket, like `scry
-	// stop`) to shut down. cancel() here stops whatever startCore
-	// goroutines (scheduler, watcher) are still running, mirroring what
-	// ctx cancellation already did for ipc.Serve via the "stop" op's own
-	// cancel call.
+	// stop`) to shut down and unregistered the hotkey. cancel() here
+	// stops whatever startCore goroutines (scheduler, watcher) are still
+	// running, mirroring what ctx cancellation already did for ipc.Serve
+	// via the "stop" op's own cancel call.
 	err = menubar.Run(menubar.Options{
-		Addr:    addr,
-		WebAddr: web.DefaultAddr,
+		Addr:        addr,
+		WebAddr:     web.DefaultAddr,
+		HotkeyCombo: cfg.Hotkey.Combo,
 	})
 	cancel()
 	return err

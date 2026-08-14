@@ -19,9 +19,16 @@ type Options struct {
 	Addr ipc.Addr
 
 	// WebAddr is internal/web's bind address; it must already be serving
-	// by the time Run is called. Search… opens http://WebAddr/ in the
-	// user's default browser (§7 option 1).
+	// by the time Run is called. Search… and the hotkey panel both point
+	// at http://WebAddr/.
 	WebAddr string
+
+	// HotkeyCombo is the raw config string from config.Hotkey.Combo, e.g.
+	// "alt+space". A combo that fails internal/hotkey.Parse makes Run
+	// return an error before the status item ever appears — better to
+	// fail the whole command with a clear message than to silently run
+	// with no hotkey.
+	HotkeyCombo string
 
 	// PollInterval is how often the live indexed-file count refreshes.
 	// <= 0 uses DefaultPollInterval.

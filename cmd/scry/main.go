@@ -35,7 +35,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: scry <query> | scry root add/rm/list | scry index | scry status | scry daemon | scry stop")
+		return fmt.Errorf("usage: scry <query> | scry root add/rm/list | scry index | scry status | scry daemon | scry menubar | scry stop")
 	}
 
 	switch args[0] {
@@ -47,6 +47,8 @@ func run(args []string) error {
 		return runStatus(args[1:])
 	case "daemon":
 		return runDaemon(args[1:])
+	case "menubar":
+		return runMenubar(args[1:])
 	case "stop":
 		return runStop(args[1:])
 	default:

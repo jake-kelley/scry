@@ -193,3 +193,38 @@ syntax filter against it. `internal/ipc`'s tests cover a full round trip over a
 real listener, stale-socket recovery, a handler panic not taking down the
 connection or the listener, and refusing to steal a socket from a daemon that's
 actually still running.
+
+## Install on macOS
+
+Ships as a proper `.app` bundle plus a per-user LaunchAgent, per the design
+doc's [§7](../everything-macos-design.md#7-menu-bar-app-and-launching-at-login).
+Everything lives under [`packaging/`](packaging/).
+
+```sh
+packaging/install.sh
+```
+
+Builds `scry.app` (`packaging/build-app.sh`), installs it to `/Applications`
+(or `~/Applications` if that isn't writable), and loads the LaunchAgent so
+`scry daemon` starts at login and on every crash (`RunAtLoad` + `KeepAlive`).
+It's a **LaunchAgent, not a LaunchDaemon** — a daemon has no window-server
+connection and can't draw a menu bar item; see §7 for why that distinction is
+load-bearing.
+
+```sh
+packaging/uninstall.sh            # reverses install.sh completely
+packaging/uninstall.sh --purge    # ...and also deletes the index/config
+```
+
+By default, uninstalling leaves your index and config
+(`~/.cache/scry`, `~/.config/scry`) in place — it says so when it runs.
+
+**Before you do a lot of rebuild-and-reinstall cycles**, read
+[`packaging/SIGNING.md`](packaging/SIGNING.md) and set up the self-signed
+code signing certificate it describes. Without it, every rebuild changes the
+app's ad-hoc signing identity, and macOS treats it as a brand-new app —
+re-prompting for Documents/Desktop/Downloads access every single time.
+
+See [`packaging/MANUAL-VERIFY.md`](packaging/MANUAL-VERIFY.md) for the
+handful of checks (menu bar item, Login Items, TCC behavior) that need a
+real GUI session and can't be confirmed from a script.

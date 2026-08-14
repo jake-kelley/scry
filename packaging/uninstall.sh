@@ -54,8 +54,8 @@ if [[ "$PURGE" -eq 1 ]]; then
 	echo "uninstall.sh: --purge: removing index, cache, and config"
 	rm -rf "$HOME/.cache/scry" "$HOME/.config/scry" "$HOME/Library/Application Support/scry"
 else
-	echo "uninstall.sh: leaving index/config in place (~/.cache/scry, ~/.config/scry," \
-		"~/Library/Application Support/scry) — rerun with --purge to remove them"
+	echo "uninstall.sh: leaving index/config in place ($HOME/.cache/scry, $HOME/.config/scry," \
+		"$HOME/Library/Application Support/scry) — rerun with --purge to remove them"
 fi
 
 echo "uninstall.sh: done"

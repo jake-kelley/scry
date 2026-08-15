@@ -138,7 +138,7 @@ func (s *appState) eventLoop(mSearch, mRebuild, mPrefs, mQuit *systray.MenuItem)
 				fmt.Fprintf(os.Stderr, "scry: menubar: stopping daemon: %v\n", err)
 			}
 			// Under the installed LaunchAgent, exiting is not enough:
-			// packaging/com.jakekelley.scry.plist sets KeepAlive, so
+			// packaging/com.scry.app.plist sets KeepAlive, so
 			// launchd relaunches us the instant the process goes away and
 			// "Quit" appears to do nothing at all. Boot the job out of the
 			// GUI domain first so launchd stops supervising it. bootout is

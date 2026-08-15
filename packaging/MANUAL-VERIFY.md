@@ -9,7 +9,7 @@ what genuinely cannot be checked without eyes on the screen.
 ## Already verified over SSH — do not repeat
 
 - Bundle structure, `plutil -lint` on both plists, `LSUIElement = true`,
-  `CFBundleIdentifier = com.jakekelley.scry`.
+  `CFBundleIdentifier = com.scry.app`.
 - `codesign --verify --strict --deep` passes; ad-hoc fallback warns loudly
   when no `scry-codesign` identity exists.
 - `install.sh` loads the agent, which reaches `state = running`, `runs = 1`,

@@ -32,16 +32,24 @@ if [[ "$(id -u)" -eq 0 ]]; then
 		install.sh: GUI session, so launchctl cannot load it there.
 		install.sh: If a previous sudo run left artefacts, clear them first:
 		install.sh:   sudo rm -rf /Applications/scry.app
-		install.sh:   sudo rm -f /var/root/Library/LaunchAgents/com.jakekelley.scry.plist
+		install.sh:   sudo rm -f /var/root/Library/LaunchAgents/com.scry.app.plist
 	EOF
 	exit 1
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LABEL="com.jakekelley.scry"
+LABEL="com.scry.app"
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 AGENT_PLIST="$LAUNCH_AGENTS_DIR/$LABEL.plist"
 LOG_DIR="$HOME/Library/Logs/scry"
+
+# Labels this app has used before now. An install that only boots out $LABEL
+# would leave an older agent loaded and relaunching under KeepAlive, so two
+# daemons would race for one socket -- the second to start fails to bind,
+# exits, and launchd restarts it forever. Boot out and delete every legacy
+# agent before installing the current one. Safe on a machine that never had
+# them: bootout on an unknown label is a no-op and rm -f does not care.
+LEGACY_LABELS=(com.jakekelley.scry)
 
 if [[ -n "${SCRY_APPDIR:-}" ]]; then
 	APPDIR="$SCRY_APPDIR"
@@ -93,6 +101,16 @@ plutil -lint -s "$AGENT_PLIST"
 
 echo "install.sh: loading LaunchAgent"
 UID_GUI="gui/$(id -u)"
+
+for legacy in "${LEGACY_LABELS[@]}"; do
+	legacy_plist="$LAUNCH_AGENTS_DIR/$legacy.plist"
+	if launchctl print "$UID_GUI/$legacy" >/dev/null 2>&1 || [[ -f "$legacy_plist" ]]; then
+		echo "install.sh: removing the legacy $legacy agent"
+		launchctl bootout "$UID_GUI/$legacy" >/dev/null 2>&1 || true
+		rm -f "$legacy_plist"
+	fi
+done
+
 # bootout returns before launchd has finished tearing the job down, so on a
 # re-install the bootstrap below can land while the domain still holds the
 # dying job and fail with "Bootstrap failed: 5: Input/output error". Wait for

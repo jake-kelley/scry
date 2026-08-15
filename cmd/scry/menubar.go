@@ -20,7 +20,7 @@ import (
 // goroutines here rather than being called inline.
 //
 // Unlike every other subcommand, this one must not fail when no roots are
-// configured. It is what packaging/com.jakekelley.scry.plist launches, and
+// configured. It is what packaging/com.scry.app.plist launches, and
 // that agent sets KeepAlive: returning an error here on a fresh install put
 // launchd into an endless respawn loop, with no status item ever drawn and
 // therefore no Preferences… item to reach — the user could not configure

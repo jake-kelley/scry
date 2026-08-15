@@ -9,13 +9,17 @@
 
   install.sh fills in __SCRY_BIN__ with the path to the installed
   scry.app's bundled binary before copying this into ~/Library/LaunchAgents.
+  The Label must stay identical to Info.plist's CFBundleIdentifier and to
+  this file's own name: install.sh derives the plist filename from $LABEL,
+  and internal/menubar's bootoutSelf boots out whatever launchd reports in
+  XPC_SERVICE_NAME, which is this Label.
   Do not point this at a bare `go build` output — it must be the signed
   binary inside the .app bundle (see SIGNING.md for why that matters).
 -->
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>com.jakekelley.scry</string>
+	<string>com.scry.app</string>
 
 	<!-- `menubar`, NOT `daemon`. Both run the same resident core (indexer,
 	     FSEvents watcher, socket server); `menubar` additionally owns the

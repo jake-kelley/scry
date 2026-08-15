@@ -62,6 +62,28 @@ rm -rf "$APPDIR/scry.app"
 cp -R "$BUILD_OUT/scry.app" "$APPDIR/scry.app"
 SCRY_BIN="$APPDIR/scry.app/Contents/MacOS/scry"
 
+# The bundled binary is also the CLI, but nothing about installing an .app puts
+# it on PATH -- and the first thing anyone does after installing is
+# `scry root add <dir>`. Symlink it. /usr/local/bin is the conventional spot but
+# is root-owned on a stock macOS and this script refuses sudo, so fall back to
+# ~/.local/bin, which is this user's to create. A symlink (not a copy) means a
+# re-install updates the CLI for free.
+echo "install.sh: linking the scry CLI onto PATH"
+BIN_LINK=""
+for d in /usr/local/bin "$HOME/.local/bin"; do
+	mkdir -p "$d" 2>/dev/null || true
+	if [[ -w "$d" ]]; then
+		ln -sf "$SCRY_BIN" "$d/scry"
+		BIN_LINK="$d/scry"
+		break
+	fi
+done
+if [[ -z "$BIN_LINK" ]]; then
+	echo "install.sh: WARNING: could not write to /usr/local/bin or ~/.local/bin;" >&2
+	echo "install.sh: WARNING: the menu bar app still works, but the scry CLI is only at" >&2
+	echo "install.sh: WARNING:   $SCRY_BIN" >&2
+fi
+
 echo "install.sh: writing LaunchAgent"
 mkdir -p "$LAUNCH_AGENTS_DIR" "$LOG_DIR"
 sed -e "s|__SCRY_BIN__|$SCRY_BIN|g" \
@@ -100,3 +122,14 @@ echo "install.sh:   app     -> $APPDIR/scry.app"
 echo "install.sh:   agent   -> $AGENT_PLIST"
 echo "install.sh:   logs    -> $LOG_DIR"
 echo "install.sh:   status  -> launchctl print $UID_GUI/$LABEL"
+if [[ -n "$BIN_LINK" ]]; then
+	echo "install.sh:   cli     -> $BIN_LINK"
+	BIN_DIR="$(dirname "$BIN_LINK")"
+	case ":$PATH:" in
+	*":$BIN_DIR:"*) ;;
+	*)
+		echo "install.sh: note: $BIN_DIR is not on your PATH. Add it to use \`scry\` by name:" >&2
+		echo "install.sh:   echo 'export PATH=\"$BIN_DIR:\$PATH\"' >> ~/.zshrc && exec zsh" >&2
+		;;
+	esac
+fi

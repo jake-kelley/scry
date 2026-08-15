@@ -65,7 +65,27 @@ echo "build-app.sh: signing"
 IDENTITY_LINE="$(security find-identity -v -p codesigning login.keychain 2>/dev/null | grep -F "$SIGN_IDENTITY_NAME" || true)"
 if [[ -n "$IDENTITY_LINE" ]]; then
 	echo "build-app.sh: signing with identity \"$SIGN_IDENTITY_NAME\""
-	codesign --force --deep --options runtime --sign "$SIGN_IDENTITY_NAME" "$APP"
+	# Capture stderr so the one failure that is really an environment
+	# problem, not a signing problem, can explain itself. codesign reports
+	# "errSecInternalComponent" when it cannot reach the private key -- the
+	# usual cause is being run over ssh, because the login keychain's key
+	# ACL only grants access from inside the GUI login session. Nothing
+	# about the certificate is wrong when this happens.
+	if ! SIGN_ERR="$(codesign --force --deep --options runtime \
+		--sign "$SIGN_IDENTITY_NAME" "$APP" 2>&1)"; then
+		[[ -n "$SIGN_ERR" ]] && echo "$SIGN_ERR" >&2
+		if [[ "$SIGN_ERR" == *errSecInternalComponent* ]]; then
+			cat >&2 <<-EOF
+				build-app.sh: codesign could not reach the "$SIGN_IDENTITY_NAME" private key.
+				build-app.sh: if you are running this over ssh, that is the cause -- the login
+				build-app.sh: keychain grants key access only inside the GUI login session. Run
+				build-app.sh: this from Terminal.app on the Mac itself; the first signature will
+				build-app.sh: prompt for access, and "Always Allow" makes it non-interactive
+				build-app.sh: from then on. See packaging/SIGNING.md.
+			EOF
+		fi
+		exit 1
+	fi
 else
 	echo "build-app.sh: WARNING: no \"$SIGN_IDENTITY_NAME\" identity in the login keychain." >&2
 	echo "build-app.sh: WARNING: falling back to ad-hoc signing (codesign -s -)." >&2

@@ -215,6 +215,19 @@ back changed. With the recrawl off, drift like that persists until you use
 "Rebuild index", which still works and is what the setting reserves the crawl
 for.
 
+**Waking from sleep.** A restart replays FSEvents history from scratch, but
+the daemon does not restart when the lid closes — it keeps running, and the
+stream needs to be resynchronised, not recreated cold. On an actual system
+wake (detected via IOKit, not a timer) the daemon does the cheap thing first,
+always: it restarts the FSEvents stream from each shard's saved position,
+which replays whatever happened while the machine was asleep, the same way a
+daemon restart would. Only if that restart itself fails does it fall back to
+anything heavier — and if `recrawl_interval = "off"`, it never falls back to
+a full crawl automatically, full stop; a wake never overrides that choice.
+When the cheap resync can't run, the log says so and the index may have
+drifted until you run "Rebuild index". Either way, a wake alone never costs
+you the crawl you turned off.
+
 **`names`/`globs` versus `paths`.** `names` and `globs` match a *base name*, so
 they skip every matching directory anywhere in the tree — right for
 `node_modules`, wrong when you mean one particular directory. `paths` entries are

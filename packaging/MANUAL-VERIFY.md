@@ -73,3 +73,34 @@ what genuinely cannot be checked without eyes on the screen.
    `codesign -dv ~/Applications/scry.app` for `Authority=scry-codesign`; if
    it says `Signature=adhoc`, the identity wasn't found and every rebuild
    will keep re-prompting. This is design doc §9 item 6.
+
+8. **Wake-from-sleep triggers a resync, not a crawl.**
+   This is the one piece of `internal/power` that genuinely cannot be
+   checked over SSH — nothing can put the Mac to sleep and wake it back up
+   remotely. With the app running, watch the log:
+
+   ```
+   tail -f ~/Library/Logs/scry/scry.err
+   ```
+
+   Close the lid (or Apple menu -> Sleep) and wait a few seconds, then wake
+   the machine. Within a couple of seconds you should see:
+
+   ```
+   scry: power: system woke; resyncing the FSEvents stream from the saved position
+   scry: daemon: watcher: starting FSEvents stream (at event id ...)
+   ```
+
+   and **not** a `power: falling back to a full reconcile pass` line, unless
+   the resync itself logged a failure just above it. If `recrawl_interval`
+   is `"off"` in your config and the resync does fail, expect instead:
+
+   ```
+   scry: power: recrawl_interval is off; not falling back to a full reconcile - ...
+   ```
+
+   and no crawl. To see the escalation path instead, wake the machine
+   twice in quick succession (within ~30s) and confirm the *second* wake
+   logs `power: wake ignored, ... since the last resync` rather than
+   running anything - that's the debounce, also unverifiable without a
+   real sleep/wake cycle.

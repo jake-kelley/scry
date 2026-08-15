@@ -14,6 +14,7 @@ import (
 	"scry/internal/fsevents"
 	"scry/internal/index"
 	"scry/internal/ipc"
+	"scry/internal/power"
 	"scry/internal/qsyntax"
 	"scry/internal/query"
 	"scry/internal/reconcile"
@@ -191,7 +192,8 @@ func startCore(ctx context.Context, cfg config.Config, logPrefix string) (*daemo
 	d.wakeImpl = sched.WakeFromSleep
 	go sched.Run(ctx)
 
-	if err := startWatcher(ctx, d, cfg); err != nil {
+	ws := &watcherSupervisor{}
+	if err := ws.start(ctx, d, cfg); err != nil {
 		// A watcher that fails to start is not fatal: the recrawl
 		// Scheduler above still bounds drift to a day, per §8 item 3,
 		// and every query path still works against whatever was loaded
@@ -206,7 +208,76 @@ func startCore(ctx context.Context, cfg config.Config, logPrefix string) (*daemo
 		}
 	}
 
+	startPowerNotifier(ctx, ws, sched, d, cfg, logPrefix)
+
 	return d, nil
+}
+
+// watcherSupervisor owns the currently-running watcher's lifetime so it
+// can be restarted — stop the old one, start a fresh one — without
+// tearing down anything else startCore built. This is what lets the wake-
+// from-sleep resync path (see startPowerNotifier) reuse startWatcher
+// exactly, per §8 item 3's "reuse that path rather than inventing a second
+// one": restarting rebuilds the FSEvents stream from each shard's current
+// saved lastEID, which is the cheap repair, not a crawl.
+type watcherSupervisor struct {
+	mu     sync.Mutex
+	cancel context.CancelFunc
+}
+
+// start stops whatever watcher this supervisor was previously running (if
+// any) and starts a new one, as a child of parentCtx so it is also torn
+// down when the daemon itself shuts down. An error leaves no watcher
+// running; the caller decides how to log that.
+func (ws *watcherSupervisor) start(parentCtx context.Context, d *daemonState, cfg config.Config) error {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	if ws.cancel != nil {
+		ws.cancel()
+		ws.cancel = nil
+	}
+
+	wctx, cancel := context.WithCancel(parentCtx)
+	if err := startWatcher(wctx, d, cfg); err != nil {
+		cancel()
+		return err
+	}
+	ws.cancel = cancel
+	return nil
+}
+
+// startPowerNotifier wires internal/power's wake-from-sleep detection to
+// the resync-first, escalate-only-if-necessary behaviour §8 item 3
+// requires: on an actual system wake, restart the FSEvents stream from
+// each shard's saved position (ws.start, the same path startCore used at
+// launch) rather than crawling, and only fall back to sched's full
+// reconcile pass — never automatically if recrawl_interval is off — when
+// that restart itself could not work.
+//
+// A notifier that fails to start (every non-darwin platform, and any
+// darwin failure to register with IOKit) is a warning, not fatal, the
+// same treatment startWatcher gets above: every other code path, wake
+// detection included, degrades gracefully without it.
+func startPowerNotifier(ctx context.Context, ws *watcherSupervisor, sched *reconcile.Scheduler, d *daemonState, cfg config.Config, logPrefix string) {
+	notifier, err := power.NewNotifier()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s: warning: wake-from-sleep detection not started: %v\n", logPrefix, err)
+		return
+	}
+
+	coord := &power.Coordinator{
+		Resync:   func() error { return ws.start(ctx, d, cfg) },
+		Fallback: sched.WakeFromSleep,
+		RecrawlEnabled: func() bool {
+			_, on := cfg.RecrawlInterval()
+			return on
+		},
+		Logf: func(format string, args ...interface{}) {
+			fmt.Fprintf(os.Stderr, "%s: "+format+"\n", append([]interface{}{logPrefix}, args...)...)
+		},
+	}
+	go coord.Run(ctx, notifier)
 }
 
 // runDaemon implements `scry daemon [--serve[=host:port]]`: the resident

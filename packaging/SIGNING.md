@@ -55,9 +55,40 @@ Verify it's usable for signing:
 security find-identity -v -p codesigning login.keychain
 ```
 
-You should see a line containing `scry-codesign`. If it's missing, the
-certificate either landed in the wrong keychain or wasn't marked as a Code
-Signing type — redo step 3.
+You should see a line containing `scry-codesign`.
+
+### "0 valid identities found" — the likely reason
+
+This is the step that actually bites, and the message is misleading: the
+certificate is usually fine and present. Certificate Assistant creates the
+self-signed root but does **not** necessarily mark it trusted, and
+`find-identity -v` lists only *valid* identities, so an untrusted one is
+filtered out and you get zero with no explanation.
+
+Check by asking for invalid ones too — drop the `-v`:
+
+```sh
+security find-identity
+```
+
+If you see your certificate tagged `CSSMERR_TP_NOT_TRUSTED`, the key and
+the certificate both exist and only the trust setting is missing:
+
+```sh
+security find-certificate -c scry-codesign -p > /tmp/scry-codesign.pem
+security add-trusted-cert -r trustRoot -p codeSign /tmp/scry-codesign.pem
+```
+
+`-p codeSign` scopes the trust to code signing rather than making it a
+general-purpose trusted root — worth keeping, since this is a certificate
+you generated yourself and nothing else should honour it. The equivalent in
+the GUI is Keychain Access → double-click the certificate → **Trust** →
+*Code Signing: Always Trust*.
+
+Re-run `security find-identity -v -p codesigning`; it should now report one
+identity. If the certificate is missing entirely rather than untrusted, it
+either landed in the wrong keychain or wasn't marked as a Code Signing
+type — redo step 3.
 
 The first time you sign with a fresh self-signed certificate, macOS may pop
 a "codesign wants to sign using key … in your keychain" prompt. Click

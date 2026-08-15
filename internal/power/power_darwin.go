@@ -87,6 +87,15 @@ static dispatch_queue_t power_queue_create(void) {
     return dispatch_queue_create("dev.scry.power", DISPATCH_QUEUE_SERIAL);
 }
 
+// power_queue_release releases a queue that never made it into a
+// registration (power_register failed): dispatch_release takes
+// dispatch_object_t, a type cgo maps differently from dispatch_queue_t, so
+// the release has to happen on this side of the boundary rather than as a
+// direct C.dispatch_release call from Go.
+static void power_queue_release(dispatch_queue_t q) {
+    dispatch_release(q);
+}
+
 // power_teardown stops the notification port and returns only once no
 // callback can still be running, the same dispatch_sync-of-an-empty-block
 // trick fsevents_darwin.go's fsevents_teardown uses and explains: the
@@ -185,7 +194,7 @@ func NewNotifier() (Notifier, error) {
 	queue := C.power_queue_create()
 	result := C.power_register(C.ulonglong(handle), queue)
 	if result.root_port == 0 || result.notify_port == nil {
-		C.dispatch_release(queue)
+		C.power_queue_release(queue)
 		return nil, ErrNotSupported
 	}
 

@@ -70,14 +70,23 @@ what genuinely cannot be checked without eyes on the screen.
    Add a root under `~/Documents`, then run `uninstall.sh && install.sh`.
    With a `scry-codesign` identity set up (see `SIGNING.md`) you should
    **not** get a repeat Documents prompt. If you do, check
-   `codesign -dv ~/Applications/scry.app` for `Authority=scry-codesign`; if
-   it says `Signature=adhoc`, the identity wasn't found and every rebuild
-   will keep re-prompting. This is design doc §9 item 6.
+   `codesign -dv /Applications/scry.app` (or `~/Applications/scry.app` if
+   `/Applications` wasn't writable — `install.sh` prints which one it used)
+   for `Authority=scry-codesign`; if it says `Signature=adhoc`, the identity
+   wasn't found and every rebuild will keep re-prompting. This is design doc
+   §9 item 6.
 
 8. **Wake-from-sleep triggers a resync, not a crawl.**
    This is the one piece of `internal/power` that genuinely cannot be
    checked over SSH — nothing can put the Mac to sleep and wake it back up
-   remotely. With the app running, watch the log:
+   remotely. First confirm the notifier registered at all: right after
+   launch, `~/Library/Logs/scry/scry.err` should contain
+   `scry: daemon: wake-from-sleep detection active`. If instead it says
+   `scry: daemon: warning: wake-from-sleep detection not started: ...`,
+   IOKit registration failed and none of the below will fire — stop and
+   report that line rather than continuing the test.
+
+   With the app running, watch the log:
 
    ```
    tail -f ~/Library/Logs/scry/scry.err
@@ -87,20 +96,22 @@ what genuinely cannot be checked without eyes on the screen.
    the machine. Within a couple of seconds you should see:
 
    ```
-   scry: power: system woke; resyncing the FSEvents stream from the saved position
+   scry: daemon: power: system woke; resyncing the FSEvents stream from the saved position
    scry: daemon: watcher: starting FSEvents stream (at event id ...)
    ```
 
-   and **not** a `power: falling back to a full reconcile pass` line, unless
-   the resync itself logged a failure just above it. If `recrawl_interval`
-   is `"off"` in your config and the resync does fail, expect instead:
+   and **not** a `scry: daemon: power: falling back to a full reconcile
+   pass` line, unless the resync itself logged a failure just above it
+   (`scry: daemon: power: resync failed, the saved position could not be
+   resumed: ...`). If `recrawl_interval` is `"off"` in your config and the
+   resync does fail, expect instead:
 
    ```
-   scry: power: recrawl_interval is off; not falling back to a full reconcile - ...
+   scry: daemon: power: recrawl_interval is off; not falling back to a full reconcile — the index may have drifted while the resync was down, and "Rebuild index" will repair it
    ```
 
    and no crawl. To see the escalation path instead, wake the machine
    twice in quick succession (within ~30s) and confirm the *second* wake
-   logs `power: wake ignored, ... since the last resync` rather than
-   running anything - that's the debounce, also unverifiable without a
-   real sleep/wake cycle.
+   logs `scry: daemon: power: wake ignored, ... since the last resync`
+   rather than running anything - that's the debounce, also unverifiable
+   without a real sleep/wake cycle.

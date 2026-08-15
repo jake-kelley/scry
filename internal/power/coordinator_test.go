@@ -3,6 +3,7 @@ package power
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 )
@@ -135,9 +136,13 @@ func TestOnWakeDebounceDefaultsWhenUnset(t *testing.T) {
 
 // fakeNotifier is a Notifier a test fully controls, standing in for the
 // darwin IOKit implementation the same way internal/fsevents' tests use a
-// fake Stream.
+// fake Stream. Stop and isStopped are called from different goroutines in
+// TestRunCallsOnWakePerEvent (Run's own goroutine calls Stop; the test
+// goroutine polls isStopped), so stopped needs a lock.
 type fakeNotifier struct {
-	ch      chan struct{}
+	ch chan struct{}
+
+	mu      sync.Mutex
 	stopped bool
 }
 
@@ -145,10 +150,18 @@ func newFakeNotifier() *fakeNotifier { return &fakeNotifier{ch: make(chan struct
 
 func (f *fakeNotifier) Events() <-chan struct{} { return f.ch }
 func (f *fakeNotifier) Stop() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if !f.stopped {
 		f.stopped = true
 		close(f.ch)
 	}
+}
+
+func (f *fakeNotifier) isStopped() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.stopped
 }
 
 func TestRunCallsOnWakePerEvent(t *testing.T) {
@@ -173,10 +186,10 @@ func TestRunCallsOnWakePerEvent(t *testing.T) {
 	// n.Stop() runs from Run's own goroutine on ctx.Done(); give it a
 	// moment before asserting.
 	deadline := time.Now().Add(2 * time.Second)
-	for !n.stopped && time.Now().Before(deadline) {
+	for !n.isStopped() && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if !n.stopped {
+	if !n.isStopped() {
 		t.Error("Run did not Stop the notifier on ctx cancellation")
 	}
 }

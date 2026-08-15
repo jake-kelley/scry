@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -192,11 +193,24 @@ func loadOrCrawlAll(cfg config.Config) (shards []*index.Shard, stats []crawler.S
 	return shards, stats, loaded
 }
 
+// queryFromArgs rebuilds one query string out of the argv the shell already
+// split for us. §5's syntax is whitespace-separated and ANDed, so
+// `scry ext:go path:cmd` is two argv entries but a single two-term query.
+// Reading args[0] alone dropped every term after the first, silently — the
+// worst shape of bug for a search tool, because losing a filter yields *more*
+// results, not an error, so it looks like it worked.
+//
+// A single quoted argument still round-trips: the shell hands `scry "foo bar"`
+// over as one entry, and joining a one-element slice preserves its spaces.
+func queryFromArgs(args []string) string {
+	return strings.Join(args, " ")
+}
+
 // runSearch implements `scry <query>`: try the resident daemon over the
 // socket first (§7 — every UI path should go through it), and only fall
 // back to the in-process crawl-or-load path when no daemon answers.
 func runSearch(args []string) error {
-	q := args[0]
+	q := queryFromArgs(args)
 
 	if results, ok, err := searchViaDaemon(q); ok {
 		if err != nil {

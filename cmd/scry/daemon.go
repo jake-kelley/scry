@@ -282,6 +282,13 @@ func startPowerNotifier(ctx context.Context, ws *watcherSupervisor, sched *recon
 			fmt.Fprintf(os.Stderr, "%s: "+format+"\n", append([]interface{}{logPrefix}, args...)...)
 		},
 	}
+	// Say so on success, not only on failure. Everything this subsystem
+	// does afterwards is triggered by an event that may be hours away, so
+	// without this line the log gives a reader no way to tell "started and
+	// waiting" apart from "never started" — which is the first question
+	// packaging/MANUAL-VERIFY.md's sleep/wake check has to answer.
+	fmt.Fprintf(os.Stderr, "%s: wake-from-sleep detection active\n", logPrefix)
+
 	go coord.Run(ctx, notifier)
 }
 

@@ -1,13 +1,22 @@
 // Package reconcile implements the recrawl safety net described in
 // "everything-macos-design.md" §7 item 3 and §8 item 3: a full, from-scratch
 // crawl of one root on a low-priority timer, bounding FSEvents drift to
-// hours rather than forever. It is deliberately dumb — a full swap, not an
-// incremental diff — because that diff (§10 build order step 4) is out of
-// scope here and a full crawl is cheap at the size of one root.
+// hours rather than forever.
+//
+// The crawl itself is still a full walk, not an incremental one — a diff
+// cannot avoid stat-ing everything to learn what changed, so there is no
+// way to make the walk itself cheaper this way, and this package does not
+// claim to. What §10 build order step 4 adds on top of the full-swap
+// design this package started with (see diff.go) is: skip the snapshot
+// write and the live shard swap when the walk found nothing different,
+// and make what drifted visible via a logged summary and Result.Diff,
+// instead of silently discarding it the way a blind swap always did.
 package reconcile
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"runtime"
 	"time"
 
@@ -36,16 +45,28 @@ const NoInterval = -1 * time.Nanosecond
 // tracking back to zero. A missing or stale existing snapshot is not an
 // error here — Reconcile's job is to produce a fresh shard regardless.
 func Reconcile(root string, opts crawler.Options) (*index.Shard, crawler.Stats, error) {
+	_, _, shard, stats, err := doReconcile(root, opts)
+	return shard, stats, err
+}
+
+// doReconcile is Reconcile's implementation, additionally returning the
+// old (snapshot-loaded) shard and whether one existed, so passOnce can
+// diff against it without loading the snapshot a second time.
+func doReconcile(root string, opts crawler.Options) (old *index.Shard, hadOld bool, shard *index.Shard, stats crawler.Stats, err error) {
+	if o, lerr := snapshot.Load(root); lerr == nil {
+		old, hadOld = o, true
+	}
+
 	var lastEID uint64
-	if old, err := snapshot.Load(root); err == nil {
+	if hadOld {
 		lastEID = old.LastEID()
 	}
 
-	shard, stats, err := crawler.Crawl(root, opts)
+	shard, stats, err = crawler.Crawl(root, opts)
 	if shard != nil {
 		shard.SetLastEID(lastEID)
 	}
-	return shard, stats, err
+	return old, hadOld, shard, stats, err
 }
 
 // RootSpec pairs a root path with the crawler options it should be
@@ -61,7 +82,15 @@ type Result struct {
 	Root  string
 	Shard *index.Shard
 	Stats crawler.Stats
-	Err   error
+
+	// Diff is what changed between the shard that was on disk before this
+	// pass and the one this pass just crawled. When Err is non-nil, or
+	// when this pass refused to trust its own crawl (see the guard in
+	// passOnce), Diff is the zero value and must not be read as "nothing
+	// changed" — it means "not computed".
+	Diff Diff
+
+	Err error
 }
 
 // Scheduler runs Reconcile against a fixed list of roots on a repeating
@@ -150,12 +179,74 @@ func (sc *Scheduler) passOnce(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		shard, stats, err := Reconcile(r.Path, r.Opts)
 		if sc.onResult != nil {
-			sc.onResult(Result{Root: r.Path, Shard: shard, Stats: stats, Err: err})
+			sc.onResult(reconcileOne(r))
 		}
 		runtime.Gosched()
 	}
+}
+
+// reconcileOne runs one root's reconciliation pass and produces the Result
+// a Scheduler delivers to onResult: the fresh shard, the diff against
+// whatever was on disk before this pass, and a one-line log summary.
+//
+// The guard below is the one place this change can lose data. A crawl
+// that comes back with zero entries but a nonzero error count — root
+// unmounted mid-walk, or the root path itself unreadable — looks
+// identical, entry-count-wise, to a root that has genuinely been emptied
+// out. Diffing that against a shard that used to have thousands of
+// entries in it would produce a "removed everything" diff and, once
+// applied, a permanently empty index for a root that is probably still
+// fine. crawler.Stats.Errors plus the pre-crawl entry count is what
+// distinguishes the two: a genuinely empty crawl has no errors. When the
+// guard trips, the pass is reported as a failure (Result.Err set) instead
+// of a diff, exactly like any other Reconcile error — the existing
+// caller-side handling of Err already refuses to save or swap in that
+// case, so no separate skip path is needed for it.
+//
+// This guard only catches the total-loss shape: a crawl that partially
+// truncates (some subtree unreadable, everything else fine) still
+// produces a real, if incomplete, diff and is not caught here — the
+// design brief scopes the guard to "an empty or failed crawl", not partial
+// ones, and a partial truncation still shows up as Stats.Errors > 0 in the
+// logged summary for a human to notice.
+func reconcileOne(r RootSpec) Result {
+	old, hadOld, shard, stats, err := doReconcile(r.Path, r.Opts)
+	if err != nil {
+		logPass(r.Path, stats, Diff{}, err)
+		return Result{Root: r.Path, Shard: shard, Stats: stats, Err: err}
+	}
+
+	oldCount := 0
+	if hadOld {
+		oldCount = old.CountIndexed()
+	}
+	if stats.Entries == 0 && stats.Errors > 0 && oldCount > 0 {
+		err := fmt.Errorf("reconcile: crawl produced zero entries but reported %d error(s); refusing to treat %d previously-indexed entries as removed (root likely offline or unreadable)", stats.Errors, oldCount)
+		logPass(r.Path, stats, Diff{}, err)
+		return Result{Root: r.Path, Shard: shard, Stats: stats, Err: err}
+	}
+
+	if !hadOld {
+		old = index.New(shard.Root())
+	}
+	diff := diffShards(old, shard)
+	logPass(r.Path, stats, diff, nil)
+	return Result{Root: r.Path, Shard: shard, Stats: stats, Diff: diff}
+}
+
+// logPass writes the one-line-per-pass summary this change adds: what the
+// crawl found, and what changed relative to what was already on disk.
+// Written straight to stderr rather than threaded through a Logf field on
+// Scheduler, so turning this on needs no change to any caller's wiring.
+func logPass(root string, stats crawler.Stats, diff Diff, err error) {
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "reconcile: %s: FAILED: %v (%d entries, %d errors, %s)\n",
+			root, err, stats.Entries, stats.Errors, stats.Duration)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "reconcile: %s: %d entries (%d errors, %s) — diff: +%d -%d ~%d\n",
+		root, stats.Entries, stats.Errors, stats.Duration, diff.Added, diff.Removed, diff.Changed)
 }
 
 // WakeFromSleep requests an immediate reconciliation pass, as if the

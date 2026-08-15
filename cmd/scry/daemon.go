@@ -184,6 +184,11 @@ func startCore(ctx context.Context, cfg config.Config, logPrefix string) (*daemo
 			fmt.Fprintf(os.Stderr, "%s: reconcile %s: %v\n", logPrefix, res.Root, res.Err)
 			return
 		}
+		if res.Diff.Empty() {
+			// Nothing changed: skip the snapshot write and the live
+			// shard swap. See internal/reconcile's package doc.
+			return
+		}
 		if err := snapshot.Save(res.Shard); err != nil {
 			fmt.Fprintf(os.Stderr, "%s: warning: could not save snapshot for %s: %v\n", logPrefix, res.Root, err)
 		}

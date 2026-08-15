@@ -50,7 +50,7 @@ func TestPathReconstructionThreeLevelsDeep(t *testing.T) {
 // mixing separators: a root that ends in the OS separator (as
 // filepath.Dir-derived roots often do) must not produce a path with the
 // "wrong" separator anywhere in it once children are appended — e.g.
-// `C:\Users\jake` + "docs" + "design-notes.md" must never come out as
+// `C:\Users\example` + "docs" + "design-notes.md" must never come out as
 // `C:\Users/docs/design-notes.md`. filepath.Separator is used throughout
 // so this assertion holds on both Windows and Unix.
 func TestPathUsesOSSeparatorConsistently(t *testing.T) {

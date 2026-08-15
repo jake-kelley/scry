@@ -86,8 +86,8 @@ func TestOpenBrowserCmd(t *testing.T) {
 }
 
 func TestOpenPathCmd(t *testing.T) {
-	cmd := openPathCmd("/Users/jake/.config/scry/config.toml")
-	if len(cmd.Args) != 2 || cmd.Args[1] != "/Users/jake/.config/scry/config.toml" {
+	cmd := openPathCmd("/Users/example/.config/scry/config.toml")
+	if len(cmd.Args) != 2 || cmd.Args[1] != "/Users/example/.config/scry/config.toml" {
 		t.Errorf("openPathCmd Args = %v", cmd.Args)
 	}
 }

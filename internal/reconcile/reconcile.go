@@ -20,6 +20,16 @@ import (
 // not specify one: once a day, per §8 item 3.
 const DefaultInterval = 24 * time.Hour
 
+// NoInterval, passed to NewScheduler as the interval, turns the periodic
+// timer off entirely: the Scheduler still exists and still reconciles on
+// demand via WakeFromSleep, but nothing ever fires on its own. It is for a
+// caller that trusts the FSEvents watcher to be the only update mechanism
+// and wants the recrawl reserved for an explicit "rebuild index".
+//
+// Any negative duration means this. Zero still means DefaultInterval, so
+// the "unset" path that predates this constant is unchanged.
+const NoInterval = -1 * time.Nanosecond
+
 // Reconcile crawls root fresh and returns the resulting shard. If a
 // snapshot already exists for root, the new shard's lastEID is carried
 // forward from it, so a full-swap reconcile does not reset FSEvents
@@ -71,12 +81,12 @@ type Scheduler struct {
 }
 
 // NewScheduler builds a Scheduler over roots, reconciling all of them once
-// per interval (DefaultInterval if interval <= 0). onResult is called once
-// per root, after each Reconcile completes, from the goroutine Run is
-// called on — the caller is expected to save the snapshot and update its
-// in-memory shard from there.
+// per interval (DefaultInterval if interval is zero, never if it is
+// negative — see NoInterval). onResult is called once per root, after each
+// Reconcile completes, from the goroutine Run is called on — the caller is
+// expected to save the snapshot and update its in-memory shard from there.
 func NewScheduler(roots []RootSpec, interval time.Duration, onResult func(Result)) *Scheduler {
-	if interval <= 0 {
+	if interval == 0 {
 		interval = DefaultInterval
 	}
 	return &Scheduler{
@@ -89,24 +99,46 @@ func NewScheduler(roots []RootSpec, interval time.Duration, onResult func(Result
 
 // Run blocks, reconciling every root once per interval (or immediately on a
 // WakeFromSleep trigger), until ctx is cancelled. It never runs two roots'
-// reconciliations concurrently.
+// reconciliations concurrently. With a negative interval there is no timer
+// at all and only WakeFromSleep drives a pass.
+//
+// Note that the timer is restarted after a pass finishes, not at a fixed
+// rate: the period observed from outside is the interval plus however long
+// the crawl took. That is deliberate for a backstop — two passes should
+// never overlap or queue up behind each other — but it does mean the
+// interval is a gap, not a rate.
 func (sc *Scheduler) Run(ctx context.Context) {
-	timer := time.NewTimer(sc.interval)
-	defer timer.Stop()
+	var timerC <-chan time.Time
+	var timer *time.Timer
+	if sc.interval > 0 {
+		timer = time.NewTimer(sc.interval)
+		defer timer.Stop()
+		timerC = timer.C
+	}
+
+	// reset restarts the timer, if there is one, for another full interval.
+	// The Stop/drain dance is only correct for a timer that has not already
+	// fired, so the two call sites below differ in whether they drain.
+	reset := func(drain bool) {
+		if timer == nil {
+			return
+		}
+		if drain && !timer.Stop() {
+			<-timer.C
+		}
+		timer.Reset(sc.interval)
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-timer.C:
+		case <-timerC:
 			sc.passOnce(ctx)
-			timer.Reset(sc.interval)
+			reset(false)
 		case <-sc.wake:
 			sc.passOnce(ctx)
-			if !timer.Stop() {
-				<-timer.C
-			}
-			timer.Reset(sc.interval)
+			reset(true)
 		}
 	}
 }

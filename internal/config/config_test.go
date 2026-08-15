@@ -563,16 +563,27 @@ func TestRecrawlInterval(t *testing.T) {
 		name    string
 		value   string
 		want    time.Duration
+		wantOn  bool
 		wantErr bool
 	}{
-		{"unset means default", "", 0, false},
-		{"five minutes", "5m", 5 * time.Minute, false},
-		{"hours", "2h", 2 * time.Hour, false},
-		{"whitespace is not a value", "   ", 0, false},
-		{"unparseable", "5 minutes", 0, true},
-		{"below the floor", "1s", 0, true},
-		{"zero", "0s", 0, true},
-		{"negative", "-5m", 0, true},
+		{"unset means default", "", 0, true, false},
+		{"five minutes", "5m", 5 * time.Minute, true, false},
+		{"hours", "2h", 2 * time.Hour, true, false},
+		{"whitespace is not a value", "   ", 0, true, false},
+		{"unparseable", "5 minutes", 0, true, true},
+		{"below the floor", "1s", 0, true, true},
+		{"negative", "-5m", 0, true, true},
+
+		// Disabling it is a request, not an error: no interval, no
+		// complaint from Validate.
+		{"off", "off", 0, false, false},
+		{"never", "never", 0, false, false},
+		{"none", "none", 0, false, false},
+		{"disabled", "disabled", 0, false, false},
+		{"off is case insensitive", "Off", 0, false, false},
+		{"off tolerates padding", "  off  ", 0, false, false},
+		{"zero duration means off", "0s", 0, false, false},
+		{"bare zero means off", "0", 0, false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -580,8 +591,9 @@ func TestRecrawlInterval(t *testing.T) {
 			cfg.Roots = []Root{{Path: "/tmp/x"}}
 			cfg.Index.RecrawlInterval = tc.value
 
-			if got := cfg.RecrawlInterval(); got != tc.want {
-				t.Errorf("RecrawlInterval() = %v, want %v", got, tc.want)
+			got, on := cfg.RecrawlInterval()
+			if got != tc.want || on != tc.wantOn {
+				t.Errorf("RecrawlInterval() = (%v, %v), want (%v, %v)", got, on, tc.want, tc.wantOn)
 			}
 			errs := cfg.Validate()
 			if tc.wantErr && len(errs) == 0 {
@@ -617,7 +629,28 @@ func TestRecrawlIntervalRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got := back.RecrawlInterval(); got != 5*time.Minute {
-		t.Errorf("after round trip RecrawlInterval() = %v, want 5m", got)
+	if got, on := back.RecrawlInterval(); got != 5*time.Minute || !on {
+		t.Errorf("after round trip RecrawlInterval() = (%v, %v), want (5m, true)", got, on)
+	}
+}
+
+// TestRecrawlOffRoundTrips is the same guard for the disabled spelling: it
+// has to come back as "off" and still read as disabled, not as an empty
+// value that silently restores the 24h default.
+func TestRecrawlOffRoundTrips(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	cfg := Default()
+	cfg.Roots = []Root{{Path: "/tmp/x"}}
+	cfg.Index.RecrawlInterval = "off"
+
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	back, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got, on := back.RecrawlInterval(); got != 0 || on {
+		t.Errorf("after round trip RecrawlInterval() = (%v, %v), want (0, false)", got, on)
 	}
 }

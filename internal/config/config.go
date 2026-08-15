@@ -44,10 +44,13 @@ type IndexOpts struct {
 
 	// RecrawlInterval is how often the daemon recrawls each root from
 	// scratch, as a Go duration string ("5m", "2h", "24h"). Empty means
-	// the built-in default. Stored as a string rather than a
-	// time.Duration so the config file reads "5m" instead of TOML's
-	// nanosecond integer, and so a typo is a config error naming the bad
-	// value rather than a silent zero.
+	// the built-in default; "off" (or "never", "none", or a zero
+	// duration) turns the periodic recrawl off entirely, leaving the
+	// FSEvents watcher and an explicit rebuild as the only things that
+	// update the index. Stored as a string rather than a time.Duration so
+	// the config file reads "5m" instead of TOML's nanosecond integer,
+	// and so a typo is a config error naming the bad value rather than a
+	// silent zero.
 	RecrawlInterval string `toml:"recrawl_interval"`
 }
 
@@ -343,12 +346,14 @@ func (c Config) Validate() []error {
 		}
 	}
 
-	if s := strings.TrimSpace(c.Index.RecrawlInterval); s != "" {
+	if s := strings.TrimSpace(c.Index.RecrawlInterval); s != "" && !isRecrawlOff(s) {
 		d, err := time.ParseDuration(s)
 		switch {
 		case err != nil:
 			errs = append(errs, fmt.Errorf("config: invalid recrawl_interval %q: %w "+
-				"(use a Go duration like \"5m\", \"2h\", \"24h\")", s, err))
+				"(use a Go duration like \"5m\", \"2h\", \"24h\", or \"off\")", s, err))
+		case d == 0:
+			// "0"/"0s" is the same request as "off", not an interval.
 		case d < minRecrawlInterval:
 			errs = append(errs, fmt.Errorf("config: recrawl_interval %q is below the %s minimum: "+
 				"a full recrawl that often would never stop running", s, minRecrawlInterval))
@@ -384,21 +389,46 @@ func validateExcludePath(p string) error {
 // background crawl.
 const minRecrawlInterval = 30 * time.Second
 
-// RecrawlInterval returns the configured recrawl period, or 0 when none is
-// set — which every caller passes straight to reconcile.NewScheduler,
-// whose documented contract is that a non-positive interval means the
-// default. An unparseable value also yields 0 here; Validate is what
-// reports it, so a broken duration degrades to the default rather than
-// stopping the daemon from starting.
-func (c Config) RecrawlInterval() time.Duration {
-	if strings.TrimSpace(c.Index.RecrawlInterval) == "" {
-		return 0
+// RecrawlInterval returns the configured recrawl period and whether the
+// periodic recrawl is wanted at all. The period is 0 when none is set,
+// which callers pass straight to reconcile.NewScheduler, whose documented
+// contract is that zero means the default. An unparseable value also
+// yields (0, true); Validate is what reports it, so a broken duration
+// degrades to the default rather than stopping the daemon from starting.
+//
+// A false second return means the config asked for no periodic recrawl at
+// all — a deliberate choice, not a failure to parse, so it must not be
+// confused with the zero above.
+func (c Config) RecrawlInterval() (time.Duration, bool) {
+	s := strings.TrimSpace(c.Index.RecrawlInterval)
+	if s == "" {
+		return 0, true
 	}
-	d, err := time.ParseDuration(c.Index.RecrawlInterval)
-	if err != nil || d < minRecrawlInterval {
-		return 0
+	if isRecrawlOff(s) {
+		return 0, false
 	}
-	return d
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, true
+	}
+	if d == 0 {
+		return 0, false
+	}
+	if d < minRecrawlInterval {
+		return 0, true
+	}
+	return d, true
+}
+
+// isRecrawlOff reports whether s is one of the words that disable the
+// periodic recrawl. A zero duration ("0", "0s") means the same thing and is
+// handled by RecrawlInterval directly, since it has to parse s anyway.
+func isRecrawlOff(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "off", "never", "none", "disabled":
+		return true
+	}
+	return false
 }
 
 // ExpandExcludePaths tilde-expands and cleans each entry so callers can

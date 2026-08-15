@@ -104,6 +104,58 @@ func TestSchedulerRunsAllRootsAndRespectsCancellation(t *testing.T) {
 	<-done // Run must return once ctx is cancelled.
 }
 
+// TestSchedulerNoIntervalNeverFiresOnItsOwn covers recrawl_interval =
+// "off": the timer must be absent entirely, not merely long. The negative
+// interval also has to survive NewScheduler, which turns *zero* into the
+// 24h default — mixing those two up would silently re-enable the recrawl.
+func TestSchedulerNoIntervalNeverFiresOnItsOwn(t *testing.T) {
+	withTempCacheHome(t)
+
+	root := t.TempDir()
+	results := make(chan Result, 4)
+
+	sc := NewScheduler([]RootSpec{{Path: root}}, NoInterval, func(r Result) { results <- r })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		sc.Run(ctx)
+		close(done)
+	}()
+
+	select {
+	case r := <-results:
+		t.Fatalf("a pass ran for %q with the periodic recrawl off", r.Root)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// An explicit rebuild must still work: off means no timer, not a
+	// scheduler that has stopped listening.
+	sc.WakeFromSleep()
+	select {
+	case r := <-results:
+		if r.Root != root {
+			t.Fatalf("Result.Root = %q, want %q", r.Root, root)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WakeFromSleep did not trigger a pass with the periodic recrawl off")
+	}
+
+	// And a second wake still works — the reset path must not block or
+	// panic on the drain of a timer that does not exist.
+	sc.WakeFromSleep()
+	select {
+	case <-results:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second WakeFromSleep produced no pass")
+	}
+
+	cancel()
+	<-done
+}
+
 func TestSchedulerWakeFromSleepTriggersImmediatePass(t *testing.T) {
 	withTempCacheHome(t)
 

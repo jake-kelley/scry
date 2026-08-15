@@ -171,8 +171,14 @@ func startCore(ctx context.Context, cfg config.Config, logPrefix string) (*daemo
 		specs[i] = reconcile.RootSpec{Path: r.Path, Opts: crawlOptions(cfg, r)}
 	}
 	// A zero here means "use reconcile's own default", which is exactly
-	// what an unset or rejected recrawl_interval yields.
-	sched := reconcile.NewScheduler(specs, cfg.RecrawlInterval(), func(res reconcile.Result) {
+	// what an unset or rejected recrawl_interval yields. recrawl_interval
+	// = "off" is different: it asks for no timer at all, and the
+	// Scheduler is still built so an explicit rebuild can drive it.
+	interval, periodic := cfg.RecrawlInterval()
+	if !periodic {
+		interval = reconcile.NoInterval
+	}
+	sched := reconcile.NewScheduler(specs, interval, func(res reconcile.Result) {
 		if res.Err != nil {
 			fmt.Fprintf(os.Stderr, "%s: reconcile %s: %v\n", logPrefix, res.Root, res.Err)
 			return
@@ -189,8 +195,15 @@ func startCore(ctx context.Context, cfg config.Config, logPrefix string) (*daemo
 		// A watcher that fails to start is not fatal: the recrawl
 		// Scheduler above still bounds drift to a day, per §8 item 3,
 		// and every query path still works against whatever was loaded
-		// at startup.
+		// at startup. With recrawl_interval = "off" there is no such
+		// bound left, which is worth saying out loud in the log — that
+		// combination means the index only changes on an explicit
+		// rebuild.
 		fmt.Fprintf(os.Stderr, "%s: warning: watcher not started: %v\n", logPrefix, err)
+		if !periodic {
+			fmt.Fprintf(os.Stderr, "%s: warning: recrawl_interval is off and the watcher is down; "+
+				"the index will not update until you rebuild it\n", logPrefix)
+		}
 	}
 
 	return d, nil

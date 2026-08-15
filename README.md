@@ -189,7 +189,7 @@ paths = ["~/Library"]                # anchored: this directory only
 [index]
 follow_symlinks = false
 hidden = false
-recrawl_interval = "5m"              # default 24h; minimum 30s
+recrawl_interval = "off"             # default 24h; minimum 30s; "off" to disable
 ```
 
 `recrawl_interval` is how often the daemon re-walks each root from scratch. It is
@@ -197,7 +197,23 @@ a backstop, not the update mechanism — the FSEvents watcher already applies
 creates, renames and deletes within a second, so this exists to catch drift the
 watcher could have missed (events dropped while the machine slept, a root that
 was unmounted). Shortening it costs a full crawl each time: measured on a 43k-entry
-home directory that is ~1.6s. Anything under 30s is rejected.
+macOS home directory that is ~50s warm and over two minutes cold. Anything under
+30s is rejected.
+
+The interval is the gap *between* passes, not a fixed rate — the timer restarts
+when a pass finishes, so the observed period is `recrawl_interval` plus however
+long the crawl took. At `"5m"` on that same home directory, snapshots landed
+about six minutes apart.
+
+`recrawl_interval = "off"` (or `"never"`, `"none"`, `"0"`) turns the periodic
+recrawl off completely, leaving FSEvents as the only thing that updates the
+index. That is a reasonable choice — the watcher replays event history on every
+daemon start, so an ordinary restart or reboot still catches up on what changed
+while it was down. What it gives up is the case FSEvents itself loses: the
+kernel dropping events under pressure, or a root that was unmounted and came
+back changed. With the recrawl off, drift like that persists until you use
+"Rebuild index", which still works and is what the setting reserves the crawl
+for.
 
 **`names`/`globs` versus `paths`.** `names` and `globs` match a *base name*, so
 they skip every matching directory anywhere in the tree — right for

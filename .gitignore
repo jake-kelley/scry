@@ -1,6 +1,9 @@
-# build artifacts
-scry
-scry.exe
+# build artifacts.
+# These are anchored with a leading slash on purpose: a bare "scry" is a
+# pattern git matches against every path component, so it silently ignored
+# the entire cmd/scry/ directory and any new file added under it.
+/scry
+/scry.exe
 *.exe
 scry-darwin-*
 scry-linux-*

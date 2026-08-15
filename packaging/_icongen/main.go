@@ -8,9 +8,17 @@
 // `go test ./...` — it is build tooling, not part of the scry module's
 // package graph, and must never affect those commands.
 //
-// Regenerate with:
+// Regenerate the app icon (black, for macOS's own recolouring) with:
 //
 //	go run ./packaging/_icongen -out packaging/icon-source/icon-1024.png
+//
+// The same mark, coloured, doubles as docs/logo.png for the README, where
+// a pure-black template icon would be invisible on GitHub's dark theme.
+// #4a6cf0 sits between the web UI's two accent tokens, #3a5ceb (light
+// theme) and #6f8dff (dark theme), in internal/web, so the logo matches
+// the product:
+//
+//	go run ./packaging/_icongen -out docs/logo.png -size 512 -color '#4a6cf0'
 package main
 
 import (
@@ -26,9 +34,16 @@ import (
 func main() {
 	out := flag.String("out", "packaging/icon-source/icon-1024.png", "output PNG path")
 	size := flag.Int("size", 1024, "image size in pixels (square)")
+	colorHex := flag.String("color", "#000000", "mark colour as #rrggbb (default black, for macOS template icons)")
 	flag.Parse()
 
-	img := drawMagnifyingGlass(*size)
+	c, err := parseHexColor(*colorHex)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "icongen:", err)
+		os.Exit(1)
+	}
+
+	img := drawMagnifyingGlass(*size, c)
 
 	f, err := os.Create(*out)
 	if err != nil {
@@ -43,11 +58,23 @@ func main() {
 	}
 }
 
+// parseHexColor parses a "#rrggbb" string into an RGB triple.
+func parseHexColor(s string) (color.NRGBA, error) {
+	if len(s) != 7 || s[0] != '#' {
+		return color.NRGBA{}, fmt.Errorf("invalid -color %q: want #rrggbb", s)
+	}
+	var r, g, b uint8
+	if _, err := fmt.Sscanf(s[1:], "%02x%02x%02x", &r, &g, &b); err != nil {
+		return color.NRGBA{}, fmt.Errorf("invalid -color %q: want #rrggbb", s)
+	}
+	return color.NRGBA{R: r, G: g, B: b, A: 255}, nil
+}
+
 // drawMagnifyingGlass renders a simple magnifying-glass silhouette:
-// a ring plus a handle, black with per-pixel alpha (antialiased edges),
+// a ring plus a handle, coloured with per-pixel alpha (antialiased edges),
 // everything else fully transparent. Proportions target macOS's ~60%
 // content-in-frame convention for menu-bar template icons.
-func drawMagnifyingGlass(size int) *image.NRGBA {
+func drawMagnifyingGlass(size int, c color.NRGBA) *image.NRGBA {
 	img := image.NewNRGBA(image.Rect(0, 0, size, size))
 
 	center := float64(size) * 0.42
@@ -80,7 +107,7 @@ func drawMagnifyingGlass(size int) *image.NRGBA {
 
 			a := math.Max(ringAlpha, handleAlpha)
 			if a > 0 {
-				img.SetNRGBA(x, y, color.NRGBA{R: 0, G: 0, B: 0, A: uint8(a * 255)})
+				img.SetNRGBA(x, y, color.NRGBA{R: c.R, G: c.G, B: c.B, A: uint8(a * 255)})
 			}
 		}
 	}

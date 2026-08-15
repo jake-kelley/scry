@@ -163,12 +163,12 @@ func (sc *Scheduler) passOnce(ctx context.Context) {
 // current interval. It is non-blocking: a pending trigger is not doubled up
 // if called again before Run picks it up.
 //
-// This is the integration point for the wake-from-sleep triggering the
-// design doc calls out (§8 item 3) as darwin-specific: detecting the actual
-// wake event means an IOKit/IOPMLib power-notification callback via cgo,
-// which is out of scope for this phase. A darwin-only file elsewhere in the
-// build is expected to call this method when it observes a wake event;
-// nothing here needs to change to support that.
+// This is the fallback half of the wake-from-sleep integration the design
+// doc calls out (§8 item 3): internal/power detects the actual IOKit wake
+// event, and cmd/scry/daemon.go's power.Coordinator calls this method only
+// when the cheap path — restarting the FSEvents stream from each shard's
+// saved lastEID — could not work, and only when recrawl_interval has not
+// been turned off. A wake that resyncs cleanly never reaches here at all.
 func (sc *Scheduler) WakeFromSleep() {
 	select {
 	case sc.wake <- struct{}{}:

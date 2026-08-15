@@ -390,3 +390,43 @@ func TestReconcileDistinguishesGenuineEmptyFromFailedCrawl(t *testing.T) {
 		t.Fatalf("second pass diff = %+v, want Removed:1 for a genuinely emptied root", second.Diff)
 	}
 }
+
+// TestGuardTruncatedDiff covers the partial version of the accident
+// TestReconcileGuardsAgainstEmptyFailedCrawl covers: a crawl that finished
+// but lost a large subtree to an unreadable directory or an unmount. The
+// rule is deliberately narrow — errors AND a large removal — because a
+// user genuinely deleting a lot of files produces the second without the
+// first and must still be applied.
+func TestGuardTruncatedDiff(t *testing.T) {
+	cases := []struct {
+		name        string
+		crawlErrors int
+		oldCount    int
+		removed     int
+		wantErr     bool
+	}{
+		{"clean crawl removing everything is trusted", 0, 1000, 1000, false},
+		{"clean crawl removing most is trusted", 0, 1000, 999, false},
+		{"errors plus a small removal is trusted", 3, 1000, 10, false},
+		{"errors plus exactly half is trusted", 3, 1000, 500, false},
+		{"errors plus more than half is refused", 3, 1000, 501, true},
+		{"errors plus everything is refused", 1, 1000, 1000, true},
+		{"nothing indexed before, nothing to protect", 3, 0, 0, false},
+		{"first ever pass with errors and no removals", 3, 0, 0, false},
+		{"no errors and no removals", 0, 1000, 0, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := guardTruncatedDiff(tc.crawlErrors, tc.oldCount, tc.removed)
+			if tc.wantErr && err == nil {
+				t.Errorf("guardTruncatedDiff(%d, %d, %d) = nil, want an error",
+					tc.crawlErrors, tc.oldCount, tc.removed)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("guardTruncatedDiff(%d, %d, %d) = %v, want nil",
+					tc.crawlErrors, tc.oldCount, tc.removed, err)
+			}
+		})
+	}
+}

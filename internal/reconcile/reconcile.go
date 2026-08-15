@@ -204,12 +204,16 @@ func (sc *Scheduler) passOnce(ctx context.Context) {
 // caller-side handling of Err already refuses to save or swap in that
 // case, so no separate skip path is needed for it.
 //
-// This guard only catches the total-loss shape: a crawl that partially
-// truncates (some subtree unreadable, everything else fine) still
-// produces a real, if incomplete, diff and is not caught here — the
-// design brief scopes the guard to "an empty or failed crawl", not partial
-// ones, and a partial truncation still shows up as Stats.Errors > 0 in the
-// logged summary for a human to notice.
+// A second guard covers the partial version of the same accident, which
+// is the more likely one in practice: a permission change or an unmount
+// that takes out one large subtree rather than the whole root. That crawl
+// succeeds, reports errors, and yields a diff removing a large fraction of
+// the index. The pairing is what makes it safe to refuse — a user really
+// can delete half their files between two passes, but doing so does not
+// make the crawler report errors, so "lost a lot of entries" plus "hit
+// errors while walking" is a shape no legitimate change produces.
+// Deliberately conservative: it needs Errors > 0, so an error-free crawl
+// is always trusted no matter how much it removes.
 func reconcileOne(r RootSpec) Result {
 	old, hadOld, shard, stats, err := doReconcile(r.Path, r.Opts)
 	if err != nil {
@@ -231,8 +235,30 @@ func reconcileOne(r RootSpec) Result {
 		old = index.New(shard.Root())
 	}
 	diff := diffShards(old, shard)
+	if err := guardTruncatedDiff(stats.Errors, oldCount, diff.Removed); err != nil {
+		logPass(r.Path, stats, Diff{}, err)
+		return Result{Root: r.Path, Shard: shard, Stats: stats, Err: err}
+	}
 	logPass(r.Path, stats, diff, nil)
 	return Result{Root: r.Path, Shard: shard, Stats: stats, Diff: diff}
+}
+
+// guardTruncatedDiff returns a non-nil error when a diff is too destructive
+// to have come from a crawl that went wrong. Split out from reconcileOne so
+// the rule itself is testable without having to make a subtree unreadable,
+// which is not portable across the platforms this repo is developed and
+// shipped on.
+//
+// The threshold is half the previous index. Both conditions are required:
+// with no crawl errors the diff is always trusted, however large, because a
+// user emptying a directory is a legitimate thing that produces no errors.
+func guardTruncatedDiff(crawlErrors, oldCount, removed int) error {
+	if crawlErrors <= 0 || oldCount <= 0 || removed <= oldCount/2 {
+		return nil
+	}
+	return fmt.Errorf("reconcile: crawl reported %d error(s) and would remove %d of %d indexed entries; "+
+		"refusing a diff that large from a crawl that did not complete cleanly "+
+		"(subtree likely unreadable or unmounted)", crawlErrors, removed, oldCount)
 }
 
 // logPass writes the one-line-per-pass summary this change adds: what the

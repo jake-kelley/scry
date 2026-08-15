@@ -288,6 +288,11 @@ func startWatcher(ctx context.Context, d *daemonState, cfg config.Config) error 
 	}
 
 	sinceID := minLastEID(shards)
+	if fresh := unwatchedRoots(shards); len(fresh) > 0 && len(fresh) < len(shards) {
+		fmt.Fprintf(os.Stderr, "scry: daemon: watcher: no saved event position for %s; "+
+			"current only as of the last crawl, and history replay cannot fill that gap\n",
+			strings.Join(fresh, ", "))
+	}
 
 	source, err := fsevents.NewStream(fsevents.Config{
 		Paths:        paths,
@@ -338,17 +343,24 @@ func eventsLabel(supported bool) string {
 
 // minLastEID returns the smallest lastEID across shards, per §6: "resuming
 // the combined stream from the oldest shard's ID replays events other
-// shards have already applied" — safe because updates are idempotent. A
-// shard that was only ever crawled, never watched, reports 0; if that is
-// the minimum, the darwin fsevents implementation resolves it to the
-// current host event id (LatestEventID) rather than replaying full
-// history, so a single never-watched root does not force a large replay
-// for the others. Documented tradeoff: mixing one fresh root with
-// long-watched ones still means the fresh root's presence pins the whole
-// stream to "now", so any file that lands in an older root between its
-// last watch and this startup is only caught by the next recrawl pass —
-// not by history replay. Splitting fresh roots onto their own stream
-// would fix that; out of scope here (§6 mandates one combined stream).
+// shards have already applied" — safe because updates are idempotent.
+//
+// Shards reporting 0 are skipped rather than counted as the minimum. A 0
+// means "never watched", which is not a position on the event stream at
+// all, and letting it win the comparison used to pin the whole combined
+// stream to "now": the darwin implementation resolves 0 to LatestEventID,
+// so adding one fresh root silently threw away every other root's resume
+// point, and anything that landed in a long-watched root while the daemon
+// was down was never replayed. Skipping zeros costs the fresh root
+// nothing — it was already getting no replay, since it has no position to
+// replay from — and preserves the real resume point for the roots that
+// have one. When every shard is 0 the result is still 0, which is correct:
+// nothing has a position, so the stream starts from now.
+//
+// A root left at 0 is only as current as its last crawl. That was formerly
+// bounded by the recrawl scheduler; with recrawl_interval = "off" it is
+// bounded by nothing, so startWatcher names those roots in the log rather
+// than leaving the gap silent.
 func minLastEID(shards []*index.Shard) uint64 {
 	var min uint64
 	first := true
@@ -357,12 +369,27 @@ func minLastEID(shards []*index.Shard) uint64 {
 			continue
 		}
 		eid := s.LastEID()
+		if eid == 0 {
+			continue
+		}
 		if first || eid < min {
 			min = eid
 			first = false
 		}
 	}
 	return min
+}
+
+// unwatchedRoots names the shards with no event-stream position, for the
+// startup log. See minLastEID for why they are worth naming.
+func unwatchedRoots(shards []*index.Shard) []string {
+	var out []string
+	for _, s := range shards {
+		if s != nil && s.LastEID() == 0 {
+			out = append(out, s.Root())
+		}
+	}
+	return out
 }
 
 // parseServeFlag scans daemon's arguments for --serve or --serve=host:port.

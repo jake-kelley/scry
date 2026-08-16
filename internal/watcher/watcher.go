@@ -9,6 +9,8 @@ package watcher
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -190,7 +192,14 @@ func (w *Watcher) apply(ev fsevents.Event) {
 		w.markDirty(r.Path)
 
 	default:
-		applyPathEvent(shard, r, ev.Path)
+		if err := applyPathEvent(shard, r, ev.Path); err != nil {
+			// Not fatal, and deliberately not a removal: the entry stays
+			// as it was until something can actually read the path. Worth
+			// logging every time, because the usual cause is a revoked TCC
+			// grant, and silence there is what let an index lose two
+			// thirds of its entries unnoticed.
+			w.log("watcher: %s: cannot read (%v); leaving the index entry as-is", ev.Path, err)
+		}
 		shard.SetLastEID(ev.ID)
 		w.markDirty(r.Path)
 	}
@@ -232,16 +241,26 @@ func offlinePolicyLabel(r Root) string {
 // root itself (renamed, replaced, or the volume went away without an
 // explicit unmount notification). Verify by stat: gone means offline,
 // still there means reconcile with a recrawl.
+//
+// Only an error that means the root is really absent counts as gone (see
+// statMeansGone). A root that is merely unreadable — a revoked TCC grant is
+// the common case — must not be marked offline, because offline_policy =
+// "drop" empties the shard, which would discard the whole index over a
+// permission change rather than a missing disk.
 func (w *Watcher) handleRootChanged(r Root, eid uint64) {
-	if _, err := os.Stat(r.Path); err != nil {
+	_, err := os.Stat(r.Path)
+	switch {
+	case err == nil:
+		w.recrawlRoot(r, eid)
+	case statMeansGone(err):
 		if shard := w.getShard(r.Path); shard != nil {
 			w.setOffline(r, shard)
 			shard.SetLastEID(eid)
 			w.markDirty(r.Path)
 		}
-		return
+	default:
+		w.log("watcher: root %s: cannot read (%v); not marking it offline", r.Path, err)
 	}
-	w.recrawlRoot(r, eid)
 }
 
 // recrawlRoot does a full, from-scratch crawl of r (the same operation
@@ -434,19 +453,49 @@ func ensurePath(shard *index.Shard, root, path string) (uint32, bool) {
 // all the way down), absent or excluded means removed if present. This
 // deliberately ignores the event's own Created/Removed/Renamed subtype
 // flags — see the package doc for why: FSEvents does not promise
-// per-event fidelity, but a fresh lstat is always authoritative, and
-// synchronizing to it is idempotent no matter how many duplicate or
+// per-event fidelity, but a fresh lstat is authoritative about existence,
+// and synchronizing to it is idempotent no matter how many duplicate or
 // out-of-order events name the same path.
-func applyPathEvent(shard *index.Shard, r Root, path string) {
+//
+// "Authoritative" only covers lstat errors that actually mean the path is
+// gone, which is why statMeansGone exists. A returned error means the path
+// could not be classified and the index was left exactly as it was; the
+// caller logs it.
+func applyPathEvent(shard *index.Shard, r Root, path string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
-		removeIfPresent(shard, r.Path, path)
-		return
+		if statMeansGone(err) {
+			removeIfPresent(shard, r.Path, path)
+			return nil
+		}
+		return err
 	}
 	if pathExcluded(r.Path, path, r.Opts) {
 		removeIfPresent(shard, r.Path, path)
-		return
+		return nil
 	}
 	_ = info // ensurePath re-lstats the final component; kept simple over micro-optimizing away one syscall.
 	ensurePath(shard, r.Path, path)
+	return nil
+}
+
+// statMeansGone reports whether an lstat/stat error is evidence that the
+// path is really absent, as opposed to merely unreadable right now.
+//
+// Treating every stat failure as "deleted" cost a real index. On macOS,
+// TCC revokes a grant whenever the app's code signing identity changes —
+// renaming the bundle ID does it, and so does an ad-hoc rebuild. Paths
+// under ~/Desktop, ~/Documents and ~/Downloads then lstat with EPERM, not
+// ENOENT. The FSEvents history replay that runs on every daemon start and
+// every wake from sleep walks straight into them, and the old code deleted
+// each one from the shard, then persisted the result: a 43,000-entry index
+// dropped to 14,000 with no error logged anywhere, because nothing here
+// treated a permission failure as different from a deletion.
+//
+// A stale entry for a file that is genuinely gone is trivially repaired by
+// the next event or the next recrawl. A deleted entry for a file that is
+// still there is invisible — the file simply stops being findable. Keep
+// the entry whenever there is doubt.
+func statMeansGone(err error) bool {
+	return errors.Is(err, fs.ErrNotExist)
 }

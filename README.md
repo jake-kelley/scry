@@ -290,3 +290,8 @@ the job out of your GUI session first — otherwise launchd would relaunch it
 instantly and Quit would look broken. That bootout lasts for the login session
 only, so scry comes back at your next login. `uninstall.sh` is what removes it for
 good.
+
+## License
+
+[MIT](LICENSE). Use it anywhere, for anything, including commercially — the only
+condition is that the copyright notice travels with copies of the source.

@@ -25,6 +25,17 @@ what genuinely cannot be checked without eyes on the screen.
 
 ## Needs a human at the screen
 
+**All eight passed on 2026-08-16**, macOS 15.3.2 arm64, v0.2.1 (`64a59d9`),
+44,313 entries. Two findings came out of that run and are folded in below:
+item 8's log prefix was wrong (`scry: daemon:` — the shipped path is
+`scry: menubar:`), and a lid-close is not a system sleep. Re-run this list
+after any change to signing, the bundle ID, the plist, or the icon.
+
+Item 1's most likely failure — a template icon authored with colour — is
+already covered by `TestTemplateIconPNG`, which asserts every opaque pixel
+is pure black and that alpha is strictly 0 or 255. What is left for a human
+there is legibility at 22px, not correctness.
+
 1. **The status item appears, and the icon looks right.**
    `packaging/install.sh`, then look at the menu bar. A small monochrome
    scry glyph should appear. Then switch System Settings → Appearance
@@ -79,10 +90,18 @@ what genuinely cannot be checked without eyes on the screen.
 8. **Wake-from-sleep triggers a resync, not a crawl.**
    This is the one piece of `internal/power` that genuinely cannot be
    checked over SSH — nothing can put the Mac to sleep and wake it back up
-   remotely. First confirm the notifier registered at all: right after
+   remotely.
+
+   **On the log prefix.** Every line below is written by `startCore`'s
+   `logPrefix`, and the installed LaunchAgent runs `scry menubar`, so the
+   prefix you will actually see is **`scry: menubar:`**. `scry: daemon:`
+   appears only if you started `scry daemon` by hand from a shell. Same
+   code, same messages — only the prefix differs.
+
+   First confirm the notifier registered at all: right after
    launch, `~/Library/Logs/scry/scry.err` should contain
-   `scry: daemon: wake-from-sleep detection active`. If instead it says
-   `scry: daemon: warning: wake-from-sleep detection not started: ...`,
+   `scry: menubar: wake-from-sleep detection active`. If instead it says
+   `scry: menubar: warning: wake-from-sleep detection not started: ...`,
    IOKit registration failed and none of the below will fire — stop and
    report that line rather than continuing the test.
 
@@ -92,26 +111,35 @@ what genuinely cannot be checked without eyes on the screen.
    tail -f ~/Library/Logs/scry/scry.err
    ```
 
-   Close the lid (or Apple menu -> Sleep) and wait a few seconds, then wake
-   the machine. Within a couple of seconds you should see:
+   **Use `pmset sleepnow`, not the lid.** Closing the lid is not reliably a
+   system sleep: an idle-sleep assertion held by any other process (a stale
+   `coreaudiod` aggregate-device assertion is the common one — check
+   `pmset -g assertions`) leaves the machine in **Deep Idle** instead. Deep
+   Idle never posts `kIOMessageSystemWillSleep`, so no wake notification
+   fires and this test silently reads as a failure when nothing is wrong.
+   `pmset -g log` will say `Wake from Deep Idle` rather than `Sleep`.
+   `pmset sleepnow` overrides idle assertions and forces the real thing.
+
+   Sleep it, wait ~30 seconds, then wake the machine. Within a couple of
+   seconds you should see:
 
    ```
-   scry: daemon: power: system woke; resyncing the FSEvents stream from the saved position
-   scry: daemon: watcher: starting FSEvents stream (at event id ...)
+   scry: menubar: power: system woke; resyncing the FSEvents stream from the saved position
+   scry: menubar: watcher: starting FSEvents stream (at event id ...)
    ```
 
-   and **not** a `scry: daemon: power: falling back to a full reconcile
+   and **not** a `scry: menubar: power: falling back to a full reconcile
    pass` line, unless the resync itself logged a failure just above it
-   (`scry: daemon: power: resync failed, the saved position could not be
+   (`scry: menubar: power: resync failed, the saved position could not be
    resumed: ...`). If `recrawl_interval` is `"off"` in your config and the
    resync does fail, expect instead:
 
    ```
-   scry: daemon: power: recrawl_interval is off; not falling back to a full reconcile — the index may have drifted while the resync was down, and "Rebuild index" will repair it
+   scry: menubar: power: recrawl_interval is off; not falling back to a full reconcile — the index may have drifted while the resync was down, and "Rebuild index" will repair it
    ```
 
    and no crawl. To see the escalation path instead, wake the machine
    twice in quick succession (within ~30s) and confirm the *second* wake
-   logs `scry: daemon: power: wake ignored, ... since the last resync`
+   logs `scry: menubar: power: wake ignored, ... since the last resync`
    rather than running anything - that's the debounce, also unverifiable
    without a real sleep/wake cycle.
